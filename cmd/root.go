@@ -131,13 +131,14 @@ TECHNOLOGY:
 
 func handleAdd(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: shared-ip add <domain> --port=<port> --localip=<ip>")
+		fmt.Fprintln(os.Stderr, "Usage: shared-ip add <domain> --port=<port> --localip=<ip> [--backendport=<port>]")
 		os.Exit(1)
 	}
 
 	domain := args[0]
 	port := 80
 	localIP := ""
+	backendPort := 0
 
 	for _, arg := range args[1:] {
 		k, v := parseFlag(arg)
@@ -149,6 +150,13 @@ func handleAdd(args []string) {
 				os.Exit(1)
 			}
 			port = p
+		case "backendport":
+			p, err := strconv.Atoi(v)
+			if err != nil || p < 1 || p > 65535 {
+				fmt.Fprintf(os.Stderr, "Invalid backend port: %s\n", v)
+				os.Exit(1)
+			}
+			backendPort = p
 		case "localip":
 			localIP = v
 		}
@@ -177,10 +185,11 @@ func handleAdd(args []string) {
 	}
 
 	dm := config.DomainMapping{
-		Domain:  domain,
-		Port:    port,
-		LocalIP: localIP,
-		DummyIF: iface,
+		Domain:      domain,
+		Port:        port,
+		LocalIP:     localIP,
+		BackendPort: backendPort,
+		DummyIF:     iface,
 	}
 
 	if err := cfg.Add(dm); err != nil {
@@ -191,6 +200,9 @@ func handleAdd(args []string) {
 	fmt.Printf("Added: %s --port=%d --localip=%s\n", domain, port, localIP)
 	if iface != "" {
 		fmt.Printf("  Interface: %s (IP %s assigned)\n", iface, localIP)
+	}
+	if backendPort > 0 {
+		fmt.Printf("  Backend port: %d\n", backendPort)
 	}
 }
 
@@ -294,10 +306,11 @@ func handleUpdate(args []string) {
 	}
 
 	dm := config.DomainMapping{
-		Domain:  domain,
-		Port:    port,
-		LocalIP: localIP,
-		DummyIF: iface,
+		Domain:      domain,
+		Port:        port,
+		LocalIP:     localIP,
+		BackendPort: old.GetBackendPort(),
+		DummyIF:     iface,
 	}
 
 	if err := cfg.Update(dm); err != nil {

@@ -9,10 +9,11 @@ import (
 )
 
 type DomainMapping struct {
-	Domain  string `json:"domain"`
-	Port    int    `json:"port"`
-	LocalIP string `json:"local_ip"`
-	DummyIF string `json:"dummy_interface,omitempty"`
+	Domain      string `json:"domain"`
+	Port        int    `json:"port"`
+	LocalIP     string `json:"local_ip"`
+	BackendPort int    `json:"backend_port,omitempty"` // if 0, use Port
+	DummyIF     string `json:"dummy_interface,omitempty"`
 }
 
 type Config struct {
@@ -158,6 +159,14 @@ func (c *Config) Lookup(domain string, port int) *DomainMapping {
 		}
 	}
 	return nil
+}
+
+// GetBackendPort returns the effective backend port
+func (dm *DomainMapping) GetBackendPort() int {
+	if dm.BackendPort > 0 {
+		return dm.BackendPort
+	}
+	return dm.Port
 }
 
 // LookupByDomain finds the first mapping for a domain on any port

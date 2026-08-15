@@ -107,7 +107,7 @@ func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 		}
 	}
 
-	backendAddr := fmt.Sprintf("%s:%d", mapping.LocalIP, p.port)
+	backendAddr := fmt.Sprintf("%s:%d", mapping.LocalIP, mapping.GetBackendPort())
 	log.Printf("[TCP] [%s] %s -> %s", proto, domain, backendAddr)
 
 	// Connect to backend

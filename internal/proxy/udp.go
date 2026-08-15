@@ -124,7 +124,7 @@ func (p *UDPProxy) handlePacket(clientAddr *net.UDPAddr, data []byte) {
 		}
 	}
 
-	backendAddr := fmt.Sprintf("%s:%d", mapping.LocalIP, p.port)
+	backendAddr := fmt.Sprintf("%s:%d", mapping.LocalIP, mapping.GetBackendPort())
 	log.Printf("[UDP] [%s] %s -> %s", proto, domain, backendAddr)
 
 	// Connect to backend
