@@ -32,14 +32,20 @@ func NewUDPProxy(cfg *config.Config, port int) *UDPProxy {
 }
 
 func (p *UDPProxy) Start() error {
-	addr := &net.UDPAddr{Port: p.port}
+	// Listen on [::] for true dual-stack (accepts both IPv4 and IPv6)
+	addr := &net.UDPAddr{IP: net.IPv6zero, Port: p.port}
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		return fmt.Errorf("udp listen :%d: %w", p.port, err)
+		// Fallback to 0.0.0.0 if IPv6 is not available
+		addr = &net.UDPAddr{Port: p.port}
+		conn, err = net.ListenUDP("udp", addr)
+		if err != nil {
+			return fmt.Errorf("udp listen :%d: %w", p.port, err)
+		}
 	}
 	p.conn = conn
 
-	log.Printf("[UDP] Listening on :%d", p.port)
+	log.Printf("[UDP] Listening on :%d (dual-stack)", p.port)
 
 	go p.readLoop()
 	go p.cleanupLoop()
@@ -124,8 +130,15 @@ func (p *UDPProxy) handlePacket(clientAddr *net.UDPAddr, data []byte) {
 		}
 	}
 
-	backendAddr := fmt.Sprintf("%s:%d", mapping.LocalIP, mapping.GetBackendPort())
-	log.Printf("[UDP] [%s] %s -> %s", proto, domain, backendAddr)
+	// Choose backend based on client IP version
+	useIPv6 := clientAddr.IP.To4() == nil
+	clientVer := "IPv4"
+	if useIPv6 {
+		clientVer = "IPv6"
+	}
+
+	backendAddr := mapping.GetBackendAddr(useIPv6)
+	log.Printf("[UDP] [%s] %s (%s) -> %s", proto, domain, clientVer, backendAddr)
 
 	// Connect to backend
 	udpBackend, err := net.ResolveUDPAddr("udp", backendAddr)

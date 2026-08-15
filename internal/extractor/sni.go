@@ -33,6 +33,12 @@ func ExtractDomain(data []byte) (string, bool, error) {
 		}
 	}
 
+	// Check plaintext email protocols (SMTP/IMAP/POP3 STARTTLS flow)
+	// These send plaintext commands before TLS upgrade
+	if domain := extractEmailDomain(data); domain != "" {
+		return domain, false, nil
+	}
+
 	return "", false, nil
 }
 
@@ -184,4 +190,91 @@ func extractHTTPHost(data []byte) string {
 		}
 	}
 	return ""
+}
+
+// extractEmailDomain extracts domain from plaintext email protocol commands.
+// Handles SMTP (EHLO/HELO), IMAP, and POP3 before STARTTLS.
+//
+// SMTP examples:
+//   "EHLO mail.example.com\r\n"
+//   "ehlo mail.example.com\r\n"
+//   "HELO mail.example.com\r\n"
+//
+// IMAP examples:
+//   "a001 CAPABILITY\r\n" (no domain here, but EHLO may follow)
+//   "a001 STARTTLS\r\n"
+//
+// POP3 examples:
+//   "CAPA\r\n" (no domain)
+//   "STLS\r\n" (STARTTLS equivalent)
+//
+// For IMAP/POP3 without domain in commands, returns "" (caller should fallback).
+// For SMTP, extracts from EHLO/HELO parameter.
+func extractEmailDomain(data []byte) string {
+	// Convert to string for easier parsing, but only first few lines
+	text := string(data)
+
+	// Limit analysis to first 1024 bytes to avoid scanning huge buffers
+	if len(text) > 1024 {
+		text = text[:1024]
+	}
+
+	lines := strings.Split(text, "\r\n")
+	if len(lines) == 0 {
+		// Try \n line ending too
+		lines = strings.Split(text, "\n")
+	}
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		upper := strings.ToUpper(line)
+
+		// SMTP: EHLO/HELO <domain>
+		if strings.HasPrefix(upper, "EHLO ") || strings.HasPrefix(upper, "HELO ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				domain := strings.TrimSpace(parts[1])
+				// Remove brackets if present (some clients send [ip])
+				domain = strings.Trim(domain, "[]")
+				// Validate it looks like a domain (has a dot or is localhost)
+				if isValidEmailDomain(domain) {
+					return domain
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// isValidEmailDomain checks if a string looks like a valid domain name.
+// Used for SMTP EHLO/HELO parameter validation.
+func isValidEmailDomain(domain string) bool {
+	if domain == "" || len(domain) > 253 {
+		return false
+	}
+
+	// Allow localhost
+	if strings.EqualFold(domain, "localhost") {
+		return true
+	}
+
+	// Must contain at least one dot for a real domain
+	if !strings.Contains(domain, ".") {
+		return false
+	}
+
+	// Basic character check
+	for _, c := range domain {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':') {
+			return false
+		}
+	}
+
+	return true
 }

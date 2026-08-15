@@ -11,7 +11,8 @@ import (
 type DomainMapping struct {
 	Domain      string `json:"domain"`
 	Port        int    `json:"port"`
-	LocalIP     string `json:"local_ip"`
+	LocalIPv4   string `json:"local_ipv4,omitempty"`
+	LocalIPv6   string `json:"local_ipv6,omitempty"`
 	BackendPort int    `json:"backend_port,omitempty"` // if 0, use Port
 	DummyIF     string `json:"dummy_interface,omitempty"`
 }
@@ -80,7 +81,8 @@ func (c *Config) Update(dm DomainMapping) error {
 
 	for i, d := range c.Domains {
 		if d.Domain == dm.Domain && d.Port == dm.Port {
-			c.Domains[i].LocalIP = dm.LocalIP
+			c.Domains[i].LocalIPv4 = dm.LocalIPv4
+			c.Domains[i].LocalIPv6 = dm.LocalIPv6
 			if dm.DummyIF != "" {
 				c.Domains[i].DummyIF = dm.DummyIF
 			}
@@ -169,6 +171,43 @@ func (dm *DomainMapping) GetBackendPort() int {
 	return dm.Port
 }
 
+// GetBackendAddr returns the backend address for the given IP version.
+// Prefers the matching version (IPv6 client → IPv6 backend, IPv4 client → IPv4 backend).
+// Falls back to whichever is available if the preferred version is not configured.
+func (dm *DomainMapping) GetBackendAddr(useIPv6 bool) string {
+	port := dm.GetBackendPort()
+
+	if useIPv6 {
+		// IPv6 client → prefer IPv6, fallback to IPv4
+		if dm.LocalIPv6 != "" {
+			return fmt.Sprintf("[%s]:%d", dm.LocalIPv6, port)
+		}
+		if dm.LocalIPv4 != "" {
+			return fmt.Sprintf("%s:%d", dm.LocalIPv4, port)
+		}
+	} else {
+		// IPv4 client → prefer IPv4, fallback to IPv6
+		if dm.LocalIPv4 != "" {
+			return fmt.Sprintf("%s:%d", dm.LocalIPv4, port)
+		}
+		if dm.LocalIPv6 != "" {
+			return fmt.Sprintf("[%s]:%d", dm.LocalIPv6, port)
+		}
+	}
+
+	return fmt.Sprintf(":%d", port)
+}
+
+// HasIPv4 returns true if an IPv4 backend is configured
+func (dm *DomainMapping) HasIPv4() bool {
+	return dm.LocalIPv4 != ""
+}
+
+// HasIPv6 returns true if an IPv6 backend is configured
+func (dm *DomainMapping) HasIPv6() bool {
+	return dm.LocalIPv6 != ""
+}
+
 // LookupByDomain finds the first mapping for a domain on any port
 func (c *Config) LookupByDomain(domain string) *DomainMapping {
 	c.mu.RLock()
@@ -180,6 +219,20 @@ func (c *Config) LookupByDomain(domain string) *DomainMapping {
 		}
 	}
 	return nil
+}
+
+// GetByPort returns all mappings for a given port
+func (c *Config) GetByPort(port int) []DomainMapping {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var result []DomainMapping
+	for _, d := range c.Domains {
+		if d.Port == port {
+			result = append(result, d)
+		}
+	}
+	return result
 }
 
 func DefaultPath() string {
