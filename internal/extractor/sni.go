@@ -7,39 +7,49 @@ import (
 )
 
 // ExtractDomain extracts domain from TCP packet.
-// Returns: domain, isTLS, error
-func ExtractDomain(data []byte) (string, bool, error) {
+// Returns: domain, protocol, error
+// protocol is one of: "tls", "http", "smtp", "ssh", "dns", ""
+func ExtractDomain(data []byte) (string, string, error) {
 	if len(data) < 5 {
-		return "", false, nil
+		return "", "", nil
 	}
 
 	// Check TLS ClientHello (ContentType=22, TLS 1.x)
 	if data[0] == 0x16 && data[1] == 0x03 {
 		domain, err := extractSNI(data)
 		if err != nil {
-			return "", true, err
+			return "", "tls", err
 		}
 		if domain != "" {
-			return domain, true, nil
+			return domain, "tls", nil
 		}
-		return "", true, nil
+		return "", "tls", nil
+	}
+
+	// Check SSH (starts with "SSH-" protocol version exchange)
+	if isSSHHandshake(data) {
+		return "", "ssh", nil
+	}
+
+	// Check DNS over TCP (2-byte length prefix + DNS query)
+	if domain := extractDNSOverTCP(data); domain != "" {
+		return domain, "dns-tcp", nil
 	}
 
 	// Check HTTP (method starts with GET/POST/PUT/HEAD/OPTIONS/DELETE/PATCH/CONNECT)
 	if isHTTPRequest(data) {
 		domain := extractHTTPHost(data)
 		if domain != "" {
-			return domain, false, nil
+			return domain, "http", nil
 		}
 	}
 
 	// Check plaintext email protocols (SMTP/IMAP/POP3 STARTTLS flow)
-	// These send plaintext commands before TLS upgrade
 	if domain := extractEmailDomain(data); domain != "" {
-		return domain, false, nil
+		return domain, "smtp", nil
 	}
 
-	return "", false, nil
+	return "", "", nil
 }
 
 // extractSNI extracts Server Name Indication from TLS ClientHello
@@ -277,4 +287,97 @@ func isValidEmailDomain(domain string) bool {
 	}
 
 	return true
+}
+
+// isSSHHandshake checks if packet looks like SSH protocol version exchange.
+// SSH starts with "SSH-" followed by version string, e.g., "SSH-2.0-OpenSSH_8.9"
+func isSSHHandshake(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	return data[0] == 'S' && data[1] == 'S' && data[2] == 'H' && data[3] == '-'
+}
+
+// extractDNSOverTCP extracts the query domain from a DNS-over-TCP packet.
+// DNS over TCP has a 2-byte length prefix followed by the DNS message.
+// DNS message format: Header(12) + Question section.
+// Question: QNAME (labels) + QTYPE(2) + QCLASS(2)
+// Returns empty string if not a valid DNS query or domain can't be extracted.
+func extractDNSOverTCP(data []byte) string {
+	// DNS over TCP: first 2 bytes = length of DNS message
+	if len(data) < 16 { // 2 (length) + 12 (header) + at least 2 (root label + qtype/qclass)
+		return ""
+	}
+
+	dnsLen := int(binary.BigEndian.Uint16(data[0:2]))
+	if dnsLen+2 > len(data) || dnsLen < 12 {
+		return ""
+	}
+
+	// Skip the 2-byte length prefix
+	dnsMsg := data[2 : 2+dnsLen]
+
+	return extractDNSQueryDomain(dnsMsg)
+}
+
+// extractDNSQueryDomain extracts the query domain from a raw DNS message.
+// Works for both UDP and TCP DNS (after stripping TCP length prefix).
+func extractDNSQueryDomain(dnsMsg []byte) string {
+	if len(dnsMsg) < 12 {
+		return ""
+	}
+
+	// DNS Header:
+	//   ID(2) + Flags(2) + QDCOUNT(2) + ANCOUNT(2) + NSCOUNT(2) + ARCOUNT(2)
+	qdcount := int(binary.BigEndian.Uint16(dnsMsg[4:6]))
+	if qdcount < 1 {
+		return ""
+	}
+
+	// Check QR bit (bit 15 of flags): 0 = query, 1 = response
+	flags := binary.BigEndian.Uint16(dnsMsg[2:4])
+	if flags&0x8000 != 0 {
+		// This is a response, not a query
+		return ""
+	}
+
+	// Parse QNAME starting at offset 12
+	pos := 12
+	var labels []string
+
+	for pos < len(dnsMsg) {
+		labelLen := int(dnsMsg[pos])
+		pos++
+
+		if labelLen == 0 {
+			// Root label — end of QNAME
+			break
+		}
+
+		// Compression pointer (top 2 bits set)
+		if labelLen&0xC0 != 0 {
+			// Compression pointer, can't follow in query section
+			break
+		}
+
+		if pos+labelLen > len(dnsMsg) {
+			return ""
+		}
+
+		labels = append(labels, string(dnsMsg[pos:pos+labelLen]))
+		pos += labelLen
+	}
+
+	if len(labels) == 0 {
+		return ""
+	}
+
+	domain := strings.Join(labels, ".")
+
+	// Validate it looks like a real domain
+	if len(domain) < 3 || !strings.Contains(domain, ".") {
+		return ""
+	}
+
+	return domain
 }

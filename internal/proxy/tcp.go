@@ -5,9 +5,11 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
+	"time"
+
 	"shared-ip/internal/config"
 	"shared-ip/internal/extractor"
-	"time"
 )
 
 type TCPProxy struct {
@@ -87,18 +89,15 @@ func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 	clientConn.SetReadDeadline(time.Time{})
 
 	firstPacket := buf[:n]
-	domain, isTLS, err := extractor.ExtractDomain(firstPacket)
+	domain, protocol, err := extractor.ExtractDomain(firstPacket)
 	if err != nil {
 		log.Printf("[TCP] Extract error from %s: %v", clientConn.RemoteAddr(), err)
 		return
 	}
 
-	proto := "HTTP"
-	if isTLS {
-		proto = "TLS"
-	} else if domain != "" && len(firstPacket) > 0 && (firstPacket[0] == 'E' || firstPacket[0] == 'e' || firstPacket[0] == 'H' || firstPacket[0] == 'h') {
-		// EHLO/HELO → SMTP
-		proto = "SMTP"
+	proto := strings.ToUpper(protocol)
+	if proto == "" {
+		proto = "UNKNOWN"
 	}
 
 	var mapping *config.DomainMapping

@@ -2,6 +2,38 @@ package extractor
 
 import "encoding/binary"
 
+// ExtractUDPDomain extracts domain from UDP packet.
+// Returns: domain, protocol, error
+// protocol is one of: "quic", "dns", ""
+func ExtractUDPDomain(data []byte) (string, string, error) {
+	if len(data) < 2 {
+		return "", "", nil
+	}
+
+	// Check QUIC first (long header starts with 0xC0-0xFF)
+	if data[0]&0xC0 == 0xC0 {
+		domain, isQUIC, err := ExtractQUICSNI(data)
+		if isQUIC {
+			return domain, "quic", err
+		}
+	}
+
+	// Check DNS (standard query: QR=0, Opcode=0, minimum 12 bytes header)
+	if domain := extractDNSUDP(data); domain != "" {
+		return domain, "dns", nil
+	}
+
+	return "", "", nil
+}
+
+// extractDNSUDP extracts query domain from a DNS UDP packet.
+func extractDNSUDP(data []byte) string {
+	if len(data) < 12 {
+		return ""
+	}
+	return extractDNSQueryDomain(data)
+}
+
 // ExtractQUICSNI extracts SNI from QUIC Initial packet.
 // Returns: domain, isQUIC, error
 func ExtractQUICSNI(data []byte) (string, bool, error) {

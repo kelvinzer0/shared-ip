@@ -29,6 +29,9 @@ Client → VPS Public IP:443
 | IMAPS | 993 | TLS SNI | TLS-first email |
 | POP3S | 995 | TLS SNI | TLS-first email |
 | SMTP | 587, 25 | EHLO/HELO | STARTTLS — domain from EHLO command |
+| SSH | 22 | Protocol banner | Port-based fallback (no domain in SSH) |
+| DNS | 53 (UDP) | DNS query name | Extracts QNAME from query packet |
+| DNS | 53 (TCP) | DNS query name | 2-byte length prefix + DNS query |
 | QUIC/HTTP3 | 443 (UDP) | QUIC SNI | UDP-based |
 | IMAP | 143 | — | Use IMAPS (993) instead |
 | POP3 | 110 | — | Use POP3S (995) instead |
@@ -131,6 +134,9 @@ The proxy auto-detects the protocol from the first packet:
 | `0x16 0x03` | TLS ClientHello | SNI extension |
 | `GET /POST /...` | HTTP | Host header |
 | `EHLO domain` / `HELO domain` | SMTP (STARTTLS) | EHLO/HELO parameter |
+| `SSH-2.0-...` | SSH | No domain (port-based fallback) |
+| DNS query (UDP) | DNS | QNAME from query section |
+| DNS query (TCP) | DNS | 2-byte length + QNAME |
 | Other | Unknown | No routing (connection dropped) |
 
 ### TLS Detection (SNI)

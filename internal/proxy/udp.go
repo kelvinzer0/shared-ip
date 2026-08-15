@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"shared-ip/internal/config"
-	"shared-ip/internal/extractor"
+	"strings"
 	"sync"
 	"time"
+
+	"shared-ip/internal/config"
+	"shared-ip/internal/extractor"
 )
 
 type UDPProxy struct {
@@ -102,22 +104,20 @@ func (p *UDPProxy) handlePacket(clientAddr *net.UDPAddr, data []byte) {
 	}
 
 	// New session - try to extract domain
-	domain, isQUIC, err := extractor.ExtractQUICSNI(data)
+	domain, protocol, err := extractor.ExtractUDPDomain(data)
 	if err != nil {
 		log.Printf("[UDP] Extract error from %s: %v", clientAddr, err)
 		return
 	}
 
 	if domain == "" {
-		// For non-QUIC UDP, we can't route by domain
-		// Log and skip - without domain info, routing is impossible
-		log.Printf("[UDP] No domain from %s (quic=%v, len=%d)", clientAddr, isQUIC, len(data))
+		log.Printf("[UDP] No domain from %s (proto=%s, len=%d)", clientAddr, protocol, len(data))
 		return
 	}
 
-	proto := "UDP"
-	if isQUIC {
-		proto = "QUIC"
+	proto := strings.ToUpper(protocol)
+	if proto == "" {
+		proto = "UDP"
 	}
 
 	// Find backend
