@@ -122,7 +122,7 @@ func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 			if domain != "" {
 				log.Printf("[TCP] [%s] %s -> port-fallback to %s (only mapping on port %d)", proto, domain, mapping.Domain, p.port)
 			} else {
-				log.Printf("[TCP] [%s] no-domain -> port-fallback to %s:%d (only mapping on port %d)", proto, mapping.Domain, mapping.LocalIPv4, p.port)
+				log.Printf("[TCP] [%s] no-domain -> port-fallback to %s:%d (only mapping on port %d)", proto, mapping.Domain, mapping.GetBackendPort(), p.port)
 			}
 		} else if len(mappings) > 1 {
 			log.Printf("[TCP] [%s] %s -> ambiguous: %d mappings on port %d, cannot route", proto, domain, len(mappings), p.port)
