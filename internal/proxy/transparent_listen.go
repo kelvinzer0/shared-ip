@@ -9,9 +9,7 @@ import (
 
 // Linux-specific constants not defined in Go's syscall package.
 const (
-	IP_TRANSPARENT    = 19
-	IPV6_TRANSPARENT  = 19 // Same value for IPv6
-	IPV6_V6ONLY       = 26
+	IP_TRANSPARENT = 19
 )
 
 // ListenTransparent creates a listener with IP_TRANSPARENT socket option.
