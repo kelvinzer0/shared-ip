@@ -35,19 +35,20 @@ func NewUDPProxy(cfg *config.Config, port int) *UDPProxy {
 
 func (p *UDPProxy) Start() error {
 	// Listen on [::] for true dual-stack (accepts both IPv4 and IPv6)
-	addr := &net.UDPAddr{IP: net.IPv6zero, Port: p.port}
-	conn, err := net.ListenUDP("udp", addr)
+	// Use IP_TRANSPARENT for UDP listener too
+	listenAddr := &net.UDPAddr{IP: net.ParseIP("127.127.127.127"), Port: p.port}
+	conn, err := listenUDPTransparent(listenAddr)
 	if err != nil {
-		// Fallback to 0.0.0.0 if IPv6 is not available
-		addr = &net.UDPAddr{Port: p.port}
-		conn, err = net.ListenUDP("udp", addr)
+		// Fallback to normal listen
+		listenAddr = &net.UDPAddr{Port: p.port}
+		conn, err = net.ListenUDP("udp", listenAddr)
 		if err != nil {
 			return fmt.Errorf("udp listen :%d: %w", p.port, err)
 		}
 	}
 	p.conn = conn
 
-	log.Printf("[UDP] Listening on :%d (dual-stack)", p.port)
+	log.Printf("[UDP] Listening on %s (transparent)", listenAddr)
 
 	go p.readLoop()
 	go p.cleanupLoop()

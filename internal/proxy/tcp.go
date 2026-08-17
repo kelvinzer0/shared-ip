@@ -37,17 +37,17 @@ func (p *TCPProxy) Start() error {
 		p.listener = ln
 		log.Printf("[TCP] Inherited listener on :%d", p.port)
 	} else {
-		addr := fmt.Sprintf("[::]:%d", p.port)
-		ln, err := net.Listen("tcp", addr)
+		// Use IP_TRANSPARENT to listen on a special address.
+		// This intercepts ALL traffic on this port regardless of destination IP,
+		// so the backend can bind to dummy interface IPs without conflict.
+		// Like uvhost: listen on 127.127.127.127:<port>
+		listenAddr := fmt.Sprintf("127.127.127.127:%d", p.port)
+		ln, err := ListenTransparentFallback("tcp4", listenAddr)
 		if err != nil {
-			addr = fmt.Sprintf(":%d", p.port)
-			ln, err = net.Listen("tcp", addr)
-			if err != nil {
-				return fmt.Errorf("tcp listen %s: %w", addr, err)
-			}
+			return fmt.Errorf("tcp listen %s: %w", listenAddr, err)
 		}
 		p.listener = ln
-		log.Printf("[TCP] Listening on %s (dual-stack)", addr)
+		log.Printf("[TCP] Listening on %s (transparent)", listenAddr)
 	}
 
 	// Register for graceful upgrade
