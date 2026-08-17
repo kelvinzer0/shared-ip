@@ -1,5 +1,6 @@
 # shared-ip
 
+
 Domain-based reverse proxy for VPS with single public IP. Routes TCP/UDP traffic to different local backends based on domain name using SNI (TLS), HTTP Host header, SMTP RCPT TO, and QUIC SNI extraction.
 
 ## How It Works
