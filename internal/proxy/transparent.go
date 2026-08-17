@@ -7,6 +7,12 @@ import (
 	"syscall"
 )
 
+// Linux-specific constants not defined in Go's syscall package.
+const (
+	IPV6_TRANSPARENT = 19 // Same value as IP_TRANSPARENT for IPv6
+	IPV6_V6ONLY      = 26 // IPV6_V6ONLY socket option
+)
+
 // DialTransparent dials backendAddr with clientAddr as the source address.
 // Uses IP_TRANSPARENT socket option so the backend sees the original
 // client IP instead of the proxy's IP.
@@ -35,7 +41,7 @@ func DialTransparent(backendAddr string, clientAddr net.Addr) (net.Conn, error) 
 			err = c.Control(func(fd uintptr) {
 				// Enable IP_TRANSPARENT on the socket
 				if network == "tcp6" {
-					err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TRANSPARENT, 1)
+					err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, IPV6_TRANSPARENT, 1)
 				} else {
 					err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TRANSPARENT, 1)
 				}
@@ -45,7 +51,7 @@ func DialTransparent(backendAddr string, clientAddr net.Addr) (net.Conn, error) 
 
 				// Bind to the client's source address
 				if network == "tcp6" {
-					err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_BINDV6ONLY, 0)
+					err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, IPV6_V6ONLY, 0)
 					if err != nil {
 						return
 					}
