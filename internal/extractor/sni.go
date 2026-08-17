@@ -6,106 +6,120 @@ import (
 	"strings"
 )
 
-// ExtractDomain extracts domain from TCP packet.
-// Returns: domain, protocol, error
-// protocol is one of: "tls", "http", "smtp", "ssh", "dns", ""
-func ExtractDomain(data []byte) (string, string, error) {
-	if len(data) < 5 {
-		return "", "", nil
-	}
-
-	// Check TLS ClientHello (ContentType=22, TLS 1.x)
-	if data[0] == 0x16 && data[1] == 0x03 {
-		domain, err := extractSNI(data)
-		if err != nil {
-			return "", "tls", err
-		}
-		if domain != "" {
-			return domain, "tls", nil
-		}
-		return "", "tls", nil
-	}
-
-	// Check SSH (starts with "SSH-" protocol version exchange)
-	if isSSHHandshake(data) {
-		return "", "ssh", nil
-	}
-
-	// Check DNS over TCP (2-byte length prefix + DNS query)
-	if domain := extractDNSOverTCP(data); domain != "" {
-		return domain, "dns-tcp", nil
-	}
-
-	// Check HTTP (method starts with GET/POST/PUT/HEAD/OPTIONS/DELETE/PATCH/CONNECT)
-	if isHTTPRequest(data) {
-		domain := extractHTTPHost(data)
-		if domain != "" {
-			return domain, "http", nil
-		}
-	}
-
-	// Check plaintext email protocols (SMTP/IMAP/POP3 STARTTLS flow)
-	if domain := extractEmailDomain(data); domain != "" {
-		return domain, "smtp", nil
-	}
-
-	return "", "", nil
+// ExtractResult holds the result of incremental domain extraction.
+type ExtractResult struct {
+	Host     string // extracted hostname (empty if not yet found)
+	Protocol string // detected protocol: "tls", "http", "smtp", "ssh", "dns-tcp", "dns", "quic", ""
+	Done     bool   // true = extraction complete (success or definitive failure)
 }
 
-// extractSNI extracts Server Name Indication from TLS ClientHello
-func extractSNI(data []byte) (string, error) {
-	if len(data) < 5 {
-		return "", nil
+// ExtractDomainIncremental attempts to extract a domain from buffered TCP data.
+// Returns Done=true when extraction is complete (host found or impossible to find).
+// Returns Done=false when more data is needed (caller should read more bytes).
+func ExtractDomainIncremental(data []byte) ExtractResult {
+	if len(data) < 2 {
+		return ExtractResult{Done: false}
 	}
 
-	// TLS Record: ContentType(1) + Version(2) + Length(2)
-	// ContentType 22 = Handshake
-	if data[0] != 0x16 {
-		return "", nil
+	// TLS ClientHello: ContentType=0x16, Version=0x03xx
+	if data[0] == 0x16 && data[1] == 0x03 {
+		domain := extractSNI(data)
+		if domain != "" {
+			return ExtractResult{Host: domain, Protocol: "tls", Done: true}
+		}
+		// TLS detected but SNI not found yet — might need more data
+		return ExtractResult{Protocol: "tls", Done: false}
 	}
 
-	// Skip TLS record header
-	if len(data) < 6 {
-		return "", nil
-	}
-	// recordLen := binary.BigEndian.Uint16(data[3:5])
-
-	// Handshake: Type(1) + Length(3)
-	if data[5] != 0x01 { // ClientHello
-		return "", nil
+	// SSH: starts with "SSH-"
+	if len(data) >= 4 && data[0] == 'S' && data[1] == 'S' && data[2] == 'H' && data[3] == '-' {
+		return ExtractResult{Protocol: "ssh", Done: true}
 	}
 
+	// DNS over TCP: 2-byte length prefix + DNS message
+	if len(data) >= 2 {
+		dnsLen := int(binary.BigEndian.Uint16(data[0:2]))
+		if dnsLen >= 12 && dnsLen+2 <= len(data) {
+			domain := extractDNSQueryDomain(data[2 : 2+dnsLen])
+			if domain != "" {
+				return ExtractResult{Host: domain, Protocol: "dns-tcp", Done: true}
+			}
+		}
+		// Could be DNS but message incomplete — need more data
+		if dnsLen >= 12 && len(data) < dnsLen+2 && len(data) >= 4 {
+			return ExtractResult{Protocol: "dns-tcp", Done: false}
+		}
+	}
+
+	// HTTP: method + space
+	if isHTTPRequest(data) {
+		host := extractHTTPHost(data)
+		if host != "" {
+			return ExtractResult{Host: host, Protocol: "http", Done: true}
+		}
+		// HTTP detected but Host header not found yet — need more data
+		return ExtractResult{Protocol: "http", Done: false}
+	}
+
+	// SMTP: EHLO/HELO present → protocol identified, but domain comes from RCPT TO
+	if hasSMTPGreeting(data) {
+		host := extractSMTPRcptDomain(data)
+		if host != "" {
+			return ExtractResult{Host: host, Protocol: "smtp", Done: true}
+		}
+		// SMTP detected but RCPT TO not seen yet — need more data
+		return ExtractResult{Protocol: "smtp", Done: false}
+	}
+
+	// Unknown protocol — can't extract domain
+	return ExtractResult{Done: true}
+}
+
+// ExtractDomain is the legacy non-incremental interface.
+// Returns: domain, protocol, error
+func ExtractDomain(data []byte) (string, string, error) {
+	r := ExtractDomainIncremental(data)
+	return r.Host, r.Protocol, nil
+}
+
+// ─── TLS SNI ───────────────────────────────────────────────────
+
+// extractSNI extracts Server Name Indication from TLS ClientHello.
+func extractSNI(data []byte) string {
+	if len(data) < 6 || data[0] != 0x16 || data[5] != 0x01 {
+		return ""
+	}
 	if len(data) < 43 {
-		return "", nil
+		return ""
 	}
 
-	// Skip: ClientVersion(2) + Random(32)
+	// Skip: ContentType(1) + Version(2) + Length(2) + HandshakeType(1) + HSLength(3) + ClientVersion(2) + Random(32) = 43
 	pos := 43
 
 	// Session ID
 	if pos >= len(data) {
-		return "", nil
+		return ""
 	}
 	sessionIDLen := int(data[pos])
 	pos += 1 + sessionIDLen
 
 	// Cipher Suites
 	if pos+2 > len(data) {
-		return "", nil
+		return ""
 	}
 	cipherSuitesLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
 	pos += 2 + cipherSuitesLen
 
 	// Compression Methods
 	if pos >= len(data) {
-		return "", nil
+		return ""
 	}
 	compressionLen := int(data[pos])
 	pos += 1 + compressionLen
 
 	// Extensions
 	if pos+2 > len(data) {
-		return "", nil
+		return ""
 	}
 	extensionsLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
 	pos += 2
@@ -124,26 +138,24 @@ func extractSNI(data []byte) (string, error) {
 			break
 		}
 
-		// Extension type 0 = Server Name Indication
-		if extType == 0 {
+		if extType == 0 { // SNI extension
 			return parseSNIExtension(data[pos : pos+extLen])
 		}
 
 		pos += extLen
 	}
 
-	return "", nil
+	return ""
 }
 
-func parseSNIExtension(data []byte) (string, error) {
-	// SNI Extension: ServerNameListLength(2) + ServerName entries
+func parseSNIExtension(data []byte) string {
 	if len(data) < 2 {
-		return "", nil
+		return ""
 	}
 
 	listLen := int(binary.BigEndian.Uint16(data[0:2]))
 	if listLen+2 > len(data) {
-		return "", nil
+		return ""
 	}
 
 	pos := 2
@@ -156,25 +168,24 @@ func parseSNIExtension(data []byte) (string, error) {
 			break
 		}
 
-		// nameType 0 = host_name
-		if nameType == 0 {
-			return string(data[pos : pos+nameLen]), nil
+		if nameType == 0 { // host_name
+			return string(data[pos : pos+nameLen])
 		}
 
 		pos += nameLen
 	}
 
-	return "", nil
+	return ""
 }
 
-// isHTTPRequest checks if packet looks like HTTP
+// ─── HTTP ──────────────────────────────────────────────────────
+
 func isHTTPRequest(data []byte) bool {
 	methods := [][]byte{
 		[]byte("GET "), []byte("POST "), []byte("PUT "),
 		[]byte("HEAD "), []byte("OPTIONS "), []byte("DELETE "),
 		[]byte("PATCH "), []byte("CONNECT "), []byte("TRACE "),
 	}
-
 	for _, m := range methods {
 		if bytes.HasPrefix(data, m) {
 			return true
@@ -183,15 +194,15 @@ func isHTTPRequest(data []byte) bool {
 	return false
 }
 
-// extractHTTPHost extracts Host header from HTTP request
 func extractHTTPHost(data []byte) string {
 	lines := strings.Split(string(data), "\r\n")
 	for _, line := range lines[1:] {
-		if strings.HasPrefix(strings.ToLower(line), "host:") {
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "host:") {
+			// Handle optional whitespace: "Host: value" or "Host:value" or "Host : value"
 			host := strings.TrimSpace(line[5:])
-			// Remove port if present
+			// Remove port if present (but not for IPv6)
 			if idx := strings.LastIndex(host, ":"); idx != -1 {
-				// Check if it's a port (not IPv6)
 				if !strings.Contains(host[idx:], "]") {
 					host = host[:idx]
 				}
@@ -202,55 +213,34 @@ func extractHTTPHost(data []byte) string {
 	return ""
 }
 
-// extractEmailDomain extracts domain from plaintext email protocol commands.
-// Handles SMTP (EHLO/HELO), IMAP, and POP3 before STARTTLS.
-//
-// SMTP examples:
-//   "EHLO mail.example.com\r\n"
-//   "ehlo mail.example.com\r\n"
-//   "HELO mail.example.com\r\n"
-//
-// IMAP examples:
-//   "a001 CAPABILITY\r\n" (no domain here, but EHLO may follow)
-//   "a001 STARTTLS\r\n"
-//
-// POP3 examples:
-//   "CAPA\r\n" (no domain)
-//   "STLS\r\n" (STARTTLS equivalent)
-//
-// For IMAP/POP3 without domain in commands, returns "" (caller should fallback).
-// For SMTP, extracts from EHLO/HELO parameter.
-func extractEmailDomain(data []byte) string {
-	// Convert to string for easier parsing, but only first few lines
-	text := string(data)
+// ─── SMTP ──────────────────────────────────────────────────────
 
-	// Limit analysis to first 1024 bytes to avoid scanning huge buffers
-	if len(text) > 1024 {
-		text = text[:1024]
-	}
+// hasSMTPGreeting checks if the data contains SMTP EHLO/HELO commands.
+func hasSMTPGreeting(data []byte) bool {
+	upper := strings.ToUpper(string(data))
+	return strings.Contains(upper, "EHLO ") || strings.Contains(upper, "HELO ")
+}
 
-	lines := strings.Split(text, "\r\n")
-	if len(lines) == 0 {
-		// Try \n line ending too
-		lines = strings.Split(text, "\n")
+// extractSMTPRcptDomain extracts the domain from the RCPT TO command.
+// This is the actual routing target, not the EHLO domain (which is the sender).
+func extractSMTPRcptDomain(data []byte) string {
+	lines := strings.Split(string(data), "\r\n")
+	if len(lines) <= 1 {
+		lines = strings.Split(string(data), "\n")
 	}
 
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+		upper := strings.ToUpper(strings.TrimSpace(line))
 
-		upper := strings.ToUpper(line)
+		// RCPT TO:<user@domain> or RCPT TO: <user@domain>
+		if strings.HasPrefix(upper, "RCPT TO:") {
+			addr := strings.TrimSpace(line[8:])
+			addr = strings.Trim(addr, "<>")
 
-		// SMTP: EHLO/HELO <domain>
-		if strings.HasPrefix(upper, "EHLO ") || strings.HasPrefix(upper, "HELO ") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				domain := strings.TrimSpace(parts[1])
-				// Remove brackets if present (some clients send [ip])
-				domain = strings.Trim(domain, "[]")
-				// Validate it looks like a domain (has a dot or is localhost)
+			// Extract domain from user@domain
+			if idx := strings.LastIndex(addr, "@"); idx != -1 {
+				domain := addr[idx+1:]
+				domain = strings.TrimSpace(domain)
 				if isValidEmailDomain(domain) {
 					return domain
 				}
@@ -261,87 +251,43 @@ func extractEmailDomain(data []byte) string {
 	return ""
 }
 
-// isValidEmailDomain checks if a string looks like a valid domain name.
-// Used for SMTP EHLO/HELO parameter validation.
 func isValidEmailDomain(domain string) bool {
 	if domain == "" || len(domain) > 253 {
 		return false
 	}
-
-	// Allow localhost
 	if strings.EqualFold(domain, "localhost") {
 		return true
 	}
-
-	// Must contain at least one dot for a real domain
 	if !strings.Contains(domain, ".") {
 		return false
 	}
-
-	// Basic character check
 	for _, c := range domain {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
 			(c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':') {
 			return false
 		}
 	}
-
 	return true
 }
 
-// isSSHHandshake checks if packet looks like SSH protocol version exchange.
-// SSH starts with "SSH-" followed by version string, e.g., "SSH-2.0-OpenSSH_8.9"
-func isSSHHandshake(data []byte) bool {
-	if len(data) < 4 {
-		return false
-	}
-	return data[0] == 'S' && data[1] == 'S' && data[2] == 'H' && data[3] == '-'
-}
+// ─── DNS over TCP ──────────────────────────────────────────────
 
-// extractDNSOverTCP extracts the query domain from a DNS-over-TCP packet.
-// DNS over TCP has a 2-byte length prefix followed by the DNS message.
-// DNS message format: Header(12) + Question section.
-// Question: QNAME (labels) + QTYPE(2) + QCLASS(2)
-// Returns empty string if not a valid DNS query or domain can't be extracted.
-func extractDNSOverTCP(data []byte) string {
-	// DNS over TCP: first 2 bytes = length of DNS message
-	if len(data) < 16 { // 2 (length) + 12 (header) + at least 2 (root label + qtype/qclass)
-		return ""
-	}
-
-	dnsLen := int(binary.BigEndian.Uint16(data[0:2]))
-	if dnsLen+2 > len(data) || dnsLen < 12 {
-		return ""
-	}
-
-	// Skip the 2-byte length prefix
-	dnsMsg := data[2 : 2+dnsLen]
-
-	return extractDNSQueryDomain(dnsMsg)
-}
-
-// extractDNSQueryDomain extracts the query domain from a raw DNS message.
-// Works for both UDP and TCP DNS (after stripping TCP length prefix).
 func extractDNSQueryDomain(dnsMsg []byte) string {
 	if len(dnsMsg) < 12 {
 		return ""
 	}
 
-	// DNS Header:
-	//   ID(2) + Flags(2) + QDCOUNT(2) + ANCOUNT(2) + NSCOUNT(2) + ARCOUNT(2)
 	qdcount := int(binary.BigEndian.Uint16(dnsMsg[4:6]))
 	if qdcount < 1 {
 		return ""
 	}
 
-	// Check QR bit (bit 15 of flags): 0 = query, 1 = response
+	// Check QR bit: 0 = query, 1 = response
 	flags := binary.BigEndian.Uint16(dnsMsg[2:4])
 	if flags&0x8000 != 0 {
-		// This is a response, not a query
 		return ""
 	}
 
-	// Parse QNAME starting at offset 12
 	pos := 12
 	var labels []string
 
@@ -350,13 +296,11 @@ func extractDNSQueryDomain(dnsMsg []byte) string {
 		pos++
 
 		if labelLen == 0 {
-			// Root label — end of QNAME
 			break
 		}
 
-		// Compression pointer (top 2 bits set)
+		// Compression pointer
 		if labelLen&0xC0 != 0 {
-			// Compression pointer, can't follow in query section
 			break
 		}
 
@@ -373,11 +317,171 @@ func extractDNSQueryDomain(dnsMsg []byte) string {
 	}
 
 	domain := strings.Join(labels, ".")
-
-	// Validate it looks like a real domain
 	if len(domain) < 3 || !strings.Contains(domain, ".") {
 		return ""
 	}
 
 	return domain
+}
+
+// ─── QUIC (UDP) ────────────────────────────────────────────────
+
+// ExtractUDPDomain extracts domain from UDP packet.
+func ExtractUDPDomain(data []byte) (string, string, error) {
+	if len(data) < 2 {
+		return "", "", nil
+	}
+
+	// QUIC: long header starts with 0xC0-0xFF
+	if data[0]&0xC0 == 0xC0 {
+		domain, isQUIC, err := ExtractQUICSNI(data)
+		if isQUIC {
+			return domain, "quic", err
+		}
+	}
+
+	// DNS UDP
+	if len(data) >= 12 {
+		domain := extractDNSQueryDomain(data)
+		if domain != "" {
+			return domain, "dns", nil
+		}
+	}
+
+	return "", "", nil
+}
+
+func ExtractQUICSNI(data []byte) (string, bool, error) {
+	if len(data) < 6 {
+		return "", false, nil
+	}
+
+	isLongHeader := data[0]&0x80 != 0
+	if !isLongHeader {
+		return "", false, nil
+	}
+
+	packetType := (data[0] & 0x30) >> 4
+	if packetType != 0x00 {
+		return "", false, nil
+	}
+
+	if len(data) < 11 {
+		return "", false, nil
+	}
+
+	pos := 5
+	if pos >= len(data) {
+		return "", false, nil
+	}
+	destCIDLen := int(data[pos])
+	pos += 1 + destCIDLen
+
+	if pos >= len(data) {
+		return "", false, nil
+	}
+	srcCIDLen := int(data[pos])
+	pos += 1 + srcCIDLen
+
+	if pos >= len(data) {
+		return "", false, nil
+	}
+	tokenLen, n := decodeVarint(data[pos:])
+	pos += n
+	pos += int(tokenLen)
+
+	if pos >= len(data) {
+		return "", false, nil
+	}
+	_, n = decodeVarint(data[pos:])
+	pos += n
+
+	if pos >= len(data) {
+		return "", false, nil
+	}
+
+	cryptoData := findQUICCryptoFrame(data[pos:])
+	if cryptoData == nil {
+		return "", true, nil
+	}
+
+	domain := extractSNI(cryptoData)
+	if domain != "" {
+		return domain, true, nil
+	}
+
+	return "", true, nil
+}
+
+func findQUICCryptoFrame(data []byte) []byte {
+	pos := 0
+	for pos < len(data) {
+		frameType := data[pos]
+		pos++
+
+		switch frameType {
+		case 0x06: // CRYPTO
+			if pos >= len(data) {
+				return nil
+			}
+			_, n := decodeVarint(data[pos:])
+			pos += n
+			if pos >= len(data) {
+				return nil
+			}
+			length, n := decodeVarint(data[pos:])
+			pos += n
+			if pos+int(length) > len(data) {
+				return data[pos:]
+			}
+			return data[pos : pos+int(length)]
+
+		case 0x00: // PADDING
+			for pos < len(data) && data[pos] == 0x00 {
+				pos++
+			}
+		case 0x01: // PING
+		case 0x02, 0x03: // ACK
+			if pos >= len(data) {
+				return nil
+			}
+			_, n := decodeVarint(data[pos:])
+			pos += n
+			if pos >= len(data) {
+				return nil
+			}
+			_, n = decodeVarint(data[pos:])
+			pos += n
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+func decodeVarint(data []byte) (uint64, int) {
+	if len(data) == 0 {
+		return 0, 0
+	}
+	first := data[0]
+	switch first & 0xC0 {
+	case 0x00:
+		return uint64(first), 1
+	case 0x40:
+		if len(data) < 2 {
+			return 0, 0
+		}
+		return uint64(binary.BigEndian.Uint16(data[:2])) & 0x3FFF, 2
+	case 0x80:
+		if len(data) < 4 {
+			return 0, 0
+		}
+		return uint64(binary.BigEndian.Uint32(data[:4])) & 0x3FFFFFFF, 4
+	case 0xC0:
+		if len(data) < 8 {
+			return 0, 0
+		}
+		return binary.BigEndian.Uint64(data[:8]) & 0x3FFFFFFFFFFFFFFF, 8
+	}
+	return 0, 0
 }

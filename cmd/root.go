@@ -15,6 +15,7 @@ import (
 	"shared-ip/internal/dummy"
 	"shared-ip/internal/proxy"
 	"shared-ip/internal/service"
+	"shared-ip/internal/upgrade"
 )
 
 var (
@@ -27,7 +28,6 @@ var (
 )
 
 func init() {
-	// Allow override via environment variable
 	if p := os.Getenv("SHARED_IP_CONFIG"); p != "" {
 		cfgPath = p
 	} else {
@@ -44,7 +44,6 @@ func Execute() {
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
-	// Commands that don't need config
 	switch cmd {
 	case "version":
 		fmt.Println("shared-ip v1.0.0")
@@ -90,47 +89,43 @@ USAGE:
   shared-ip <command> [options]
 
 COMMANDS:
-  add <domain> --port=<port> --localipv4=<ip> [--localipv6=<ip>]    Add domain mapping
-  list                                         List all mappings
-  show <domain> --port=<port>                  Show mapping details
-  update <domain> --port=<port> [--localipv4=<ip>] [--localipv6=<ip>] [--clear-ipv4] [--clear-ipv6]
-  delete <domain> --port=<port>                Delete mapping
-  reset                                        Remove all mappings
-  daemon                                       Start proxy daemon
+  add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>]
+  list
+  show <domain> --localport=<port>
+  update <domain> --localport=<port> [--localipv4=<ip>] [--localipv6=<ip>] [--clear-ipv4] [--clear-ipv6]
+  delete <domain> --localport=<port>
+  reset
+  daemon
   service <install|uninstall|start|stop|restart|status>
-  version                                      Show version
-  help                                         Show this help
+  version
+  help
 
 OPTIONS:
-  --port=<port>        Backend port (default: 80)
-  --localipv4=<ip>     Local IPv4 address for routing
-  --localipv6=<ip>     Local IPv6 address for routing (optional)
-  --clear-ipv4         Remove IPv4 from mapping (update only)
-  --clear-ipv6         Remove IPv6 from mapping (update only)
+  --localport=<port>   Port where your service listens (default: 80).
+                       shared-ip also listens on this port.
+  --localipv4=<ip>     Backend IPv4 address (creates dummy interface)
+  --localipv6=<ip>     Backend IPv6 address (creates dummy interface)
+  --clear-ipv4         Remove IPv4 (update only)
+  --clear-ipv6         Remove IPv6 (update only)
 
-NOTE:
-  At least one of --localipv4 or --localipv6 must be present after update.
-  Use --clear-ipv4 / --clear-ipv6 to remove an address from dual-stack mapping.
+ROUTING:
+  Traffic arriving on --localport is forwarded to --localipv6 (preferred)
+  or --localipv4 on the same port. Each domain gets its own dummy
+  interface so services can bind to the assigned IP.
 
 EXAMPLES:
-  shared-ip add example.com --port=443 --localipv4=192.168.1.10
-  shared-ip add example.com --port=80 --localipv4=10.0.0.5 --localipv6=::1
-  shared-ip add dual.example.com --port=443 --localipv4=10.0.0.5 --localipv6=fd00::1
-  shared-ip update example.com --port=443 --localipv6=fd00::1     # add IPv6, keep IPv4
-  shared-ip update example.com --port=443 --clear-ipv6             # remove IPv6, keep IPv4
-  shared-ip list
-  shared-ip show example.com --port=443
-  shared-ip service install
-  service shared-ip start
+  # withfallback.com: service on localhost port 8080
+  shared-ip add example.com --localport=8080 --localipv6=::1
+
+  # Service on a specific local IP, port 443
+  shared-ip add example.com --localport=443 --localipv4=192.168.1.10
+
+  # Dual-stack
+  shared-ip add example.com --localport=80 --localipv4=10.0.0.5 --localipv6=fd00::1
 
 DNS SETUP:
-  Add A/AAAA record pointing your domain to this VPS public IP.
-
-TECHNOLOGY:
-  - TLS traffic: SNI extraction from ClientHello
-  - HTTP traffic: Host header extraction
-  - UDP/QUIC: SNI from QUIC Initial packet
-  - Auto-detects TLS vs non-TLS
+  CNAME your domain to <your-ipv6-addr>.withfallback.com
+  or add A/AAAA records pointing to this VPS public IP.
 `)
 }
 
@@ -138,7 +133,7 @@ TECHNOLOGY:
 
 func handleAdd(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: shared-ip add <domain> --port=<port> --localipv4=<ip> [--localipv6=<ip>] [--backendport=<port>]")
+		fmt.Fprintln(os.Stderr, "Usage: shared-ip add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>]")
 		os.Exit(1)
 	}
 
@@ -146,25 +141,17 @@ func handleAdd(args []string) {
 	port := 80
 	localIPv4 := ""
 	localIPv6 := ""
-	backendPort := 0
 
 	for _, arg := range args[1:] {
 		k, v := parseFlag(arg)
 		switch k {
-		case "port":
+		case "localport":
 			p, err := strconv.Atoi(v)
 			if err != nil || p < 1 || p > 65535 {
 				fmt.Fprintf(os.Stderr, "Invalid port: %s (must be 1-65535)\n", v)
 				os.Exit(1)
 			}
 			port = p
-		case "backendport":
-			p, err := strconv.Atoi(v)
-			if err != nil || p < 1 || p > 65535 {
-				fmt.Fprintf(os.Stderr, "Invalid backend port: %s\n", v)
-				os.Exit(1)
-			}
-			backendPort = p
 		case "localipv4":
 			localIPv4 = v
 		case "localipv6":
@@ -192,7 +179,7 @@ func handleAdd(args []string) {
 		os.Exit(1)
 	}
 
-	// Create dummy interface and assign IPs
+	// Create per-domain dummy interface
 	var dummyIF string
 	var ips []string
 	if localIPv4 != "" {
@@ -213,12 +200,11 @@ func handleAdd(args []string) {
 	}
 
 	dm := config.DomainMapping{
-		Domain:      domain,
-		Port:        port,
-		LocalIPv4:   localIPv4,
-		LocalIPv6:   localIPv6,
-		BackendPort: backendPort,
-		DummyIF:     dummyIF,
+		Domain:    domain,
+		Port:      port,
+		LocalIPv4: localIPv4,
+		LocalIPv6: localIPv6,
+		DummyIF:   dummyIF,
 	}
 
 	if err := cfg.Add(dm); err != nil {
@@ -226,7 +212,7 @@ func handleAdd(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Added: %s --port=%d", domain, port)
+	fmt.Printf("Added: %s --localport=%d", domain, port)
 	if localIPv4 != "" {
 		fmt.Printf(" --localipv4=%s", localIPv4)
 	}
@@ -236,9 +222,6 @@ func handleAdd(args []string) {
 	fmt.Println()
 	if dummyIF != "" {
 		fmt.Printf("  Interface: %s\n", dummyIF)
-	}
-	if backendPort > 0 {
-		fmt.Printf("  Backend port: %d\n", backendPort)
 	}
 }
 
@@ -252,7 +235,7 @@ func handleList() {
 	}
 
 	for _, d := range domains {
-		fmt.Printf("%s --port=%d\n", d.Domain, d.Port)
+		fmt.Printf("%s --localport=%d\n", d.Domain, d.Port)
 	}
 }
 
@@ -260,7 +243,7 @@ func handleList() {
 
 func handleShow(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: shared-ip show <domain> --port=<port>")
+		fmt.Fprintln(os.Stderr, "Usage: shared-ip show <domain> --localport=<port>")
 		os.Exit(1)
 	}
 
@@ -269,7 +252,7 @@ func handleShow(args []string) {
 
 	for _, arg := range args[1:] {
 		k, v := parseFlag(arg)
-		if k == "port" {
+		if k == "localport" {
 			p, err := strconv.Atoi(v)
 			if err != nil || p < 1 || p > 65535 {
 				fmt.Fprintf(os.Stderr, "Invalid port: %s\n", v)
@@ -285,7 +268,7 @@ func handleShow(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("domain=%s --port=%d", dm.Domain, dm.Port)
+	fmt.Printf("domain=%s --localport=%d", dm.Domain, dm.Port)
 	if dm.LocalIPv4 != "" {
 		fmt.Printf(" --localipv4=%s", dm.LocalIPv4)
 	}
@@ -302,7 +285,7 @@ func handleShow(args []string) {
 
 func handleUpdate(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: shared-ip update <domain> --port=<port> [--localipv4=<ip>] [--localipv6=<ip>] [--clear-ipv4] [--clear-ipv6]")
+		fmt.Fprintln(os.Stderr, "Usage: shared-ip update <domain> --localport=<port> [--localipv4=<ip>] [--localipv6=<ip>] [--clear-ipv4] [--clear-ipv6]")
 		os.Exit(1)
 	}
 
@@ -318,7 +301,7 @@ func handleUpdate(args []string) {
 	for _, arg := range args[1:] {
 		k, v := parseFlag(arg)
 		switch k {
-		case "port":
+		case "localport":
 			p, err := strconv.Atoi(v)
 			if err != nil || p < 1 || p > 65535 {
 				fmt.Fprintf(os.Stderr, "Invalid port: %s\n", v)
@@ -339,7 +322,7 @@ func handleUpdate(args []string) {
 	}
 
 	if !hasIPv4Flag && !hasIPv6Flag && !clearIPv4 && !clearIPv6 {
-		fmt.Fprintln(os.Stderr, "Nothing to update. Use --localipv4=<ip>, --localipv6=<ip>, --clear-ipv4, or --clear-ipv6")
+		fmt.Fprintln(os.Stderr, "Nothing to update. Use --localipv4, --localipv6, --clear-ipv4, or --clear-ipv6")
 		os.Exit(1)
 	}
 
@@ -353,14 +336,13 @@ func handleUpdate(args []string) {
 		os.Exit(1)
 	}
 
-	// Get existing mapping
 	old, _ := cfg.Get(domain, port)
 	if old == nil {
 		fmt.Fprintf(os.Stderr, "Not found: %s:%d\n", domain, port)
 		os.Exit(1)
 	}
 
-	// Determine final IPv4/IPv6 values (merge with existing)
+	// Merge with existing
 	finalIPv4 := old.LocalIPv4
 	finalIPv6 := old.LocalIPv6
 
@@ -376,47 +358,42 @@ func handleUpdate(args []string) {
 		finalIPv6 = localIPv6
 	}
 
-	// Validate: at least one address must remain
 	if finalIPv4 == "" && finalIPv6 == "" {
 		fmt.Fprintln(os.Stderr, "Cannot remove all addresses. At least one of --localipv4 or --localipv6 must remain.")
 		os.Exit(1)
 	}
 
-	// Cleanup old dummy interfaces
-	if old.DummyIF != "" {
-		if old.LocalIPv4 != "" && old.LocalIPv4 != finalIPv4 {
-			dummy.Teardown(old.LocalIPv4)
-		}
-		if old.LocalIPv6 != "" && old.LocalIPv6 != finalIPv6 {
-			dummy.Teardown(old.LocalIPv6)
-		}
-	}
-
-	// Setup new dummy interfaces for new IPs
+	// Rebuild dummy interface if IPs changed
+	needRebuild := old.LocalIPv4 != finalIPv4 || old.LocalIPv6 != finalIPv6
 	var dummyIF string
-	var ips []string
-	if finalIPv4 != "" {
-		ips = append(ips, finalIPv4)
-	}
-	if finalIPv6 != "" {
-		ips = append(ips, finalIPv6)
-	}
-	for _, ip := range ips {
-		iface, err := dummy.Setup(domain, ip)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: dummy interface setup for %s: %v\n", ip, err)
-		} else if dummyIF == "" {
-			dummyIF = iface
+
+	if needRebuild {
+		dummy.Teardown(domain)
+		var ips []string
+		if finalIPv4 != "" {
+			ips = append(ips, finalIPv4)
 		}
+		if finalIPv6 != "" {
+			ips = append(ips, finalIPv6)
+		}
+		for _, ip := range ips {
+			iface, err := dummy.Setup(domain, ip)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: dummy interface setup for %s: %v\n", ip, err)
+			} else if dummyIF == "" {
+				dummyIF = iface
+			}
+		}
+	} else {
+		dummyIF = old.DummyIF
 	}
 
 	dm := config.DomainMapping{
-		Domain:      domain,
-		Port:        port,
-		LocalIPv4:   finalIPv4,
-		LocalIPv6:   finalIPv6,
-		BackendPort: old.GetBackendPort(),
-		DummyIF:     dummyIF,
+		Domain:    domain,
+		Port:      port,
+		LocalIPv4: finalIPv4,
+		LocalIPv6: finalIPv6,
+		DummyIF:   dummyIF,
 	}
 
 	if err := cfg.Update(dm); err != nil {
@@ -424,7 +401,7 @@ func handleUpdate(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Updated: %s --port=%d", domain, port)
+	fmt.Printf("Updated: %s --localport=%d", domain, port)
 	if finalIPv4 != "" {
 		fmt.Printf(" --localipv4=%s", finalIPv4)
 	}
@@ -438,7 +415,7 @@ func handleUpdate(args []string) {
 
 func handleDelete(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: shared-ip delete <domain> --port=<port>")
+		fmt.Fprintln(os.Stderr, "Usage: shared-ip delete <domain> --localport=<port>")
 		os.Exit(1)
 	}
 
@@ -447,7 +424,7 @@ func handleDelete(args []string) {
 
 	for _, arg := range args[1:] {
 		k, v := parseFlag(arg)
-		if k == "port" {
+		if k == "localport" {
 			p, err := strconv.Atoi(v)
 			if err != nil || p < 1 || p > 65535 {
 				fmt.Fprintf(os.Stderr, "Invalid port: %s\n", v)
@@ -457,8 +434,7 @@ func handleDelete(args []string) {
 		}
 	}
 
-	// Confirm
-	fmt.Printf("Delete %s --port=%d? [y/N]: ", domain, port)
+	fmt.Printf("Delete %s --localport=%d? [y/N]: ", domain, port)
 	var answer string
 	fmt.Scanln(&answer)
 	if strings.ToLower(strings.TrimSpace(answer)) != "y" {
@@ -466,23 +442,14 @@ func handleDelete(args []string) {
 		return
 	}
 
-	// Cleanup dummy interface
-	old, _ := cfg.Get(domain, port)
-	if old != nil && old.DummyIF != "" {
-		if old.LocalIPv4 != "" {
-			dummy.Teardown(old.LocalIPv4)
-		}
-		if old.LocalIPv6 != "" {
-			dummy.Teardown(old.LocalIPv6)
-		}
-	}
+	dummy.Teardown(domain)
 
 	if err := cfg.Delete(domain, port); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Deleted: %s --port=%d\n", domain, port)
+	fmt.Printf("Deleted: %s --localport=%d\n", domain, port)
 }
 
 // ─── RESET ─────────────────────────────────────────────────────
@@ -496,17 +463,7 @@ func handleReset() {
 		return
 	}
 
-	// Cleanup all dummy interfaces
-	for _, d := range cfg.GetAll() {
-		if d.DummyIF != "" {
-			if d.LocalIPv4 != "" {
-				dummy.Teardown(d.LocalIPv4)
-			}
-			if d.LocalIPv6 != "" {
-				dummy.Teardown(d.LocalIPv6)
-			}
-		}
-	}
+	dummy.Cleanup()
 
 	if err := cfg.Reset(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -521,7 +478,6 @@ func handleReset() {
 func handleDaemon() {
 	log.Println("[DAEMON] Starting shared-ip daemon...")
 
-	// Start TCP proxy for each unique port
 	proxies := make([]*proxy.TCPProxy, 0)
 	udpProxies := make([]*proxy.UDPProxy, 0)
 
@@ -532,14 +488,12 @@ func handleDaemon() {
 	}
 
 	for _, port := range ports {
-		// TCP
 		tcpProxy := proxy.NewTCPProxy(cfg, port)
 		if err := tcpProxy.Start(); err != nil {
 			log.Fatalf("TCP proxy port %d: %v", port, err)
 		}
 		proxies = append(proxies, tcpProxy)
 
-		// UDP (QUIC support)
 		udpProxy := proxy.NewUDPProxy(cfg, port)
 		if err := udpProxy.Start(); err != nil {
 			log.Printf("[DAEMON] UDP proxy port %d: %v (non-critical, continuing)", port, err)
@@ -548,7 +502,22 @@ func handleDaemon() {
 		}
 	}
 
+	// Signal parent process that we're ready (graceful upgrade)
+	upgrade.Ready()
+
 	log.Printf("[DAEMON] Proxying %d port(s). Waiting for connections...", len(ports))
+
+	// Start graceful upgrade handler (SIGHUP)
+	binary, _ := os.Executable()
+	go upgrade.HandleSIGHUP(binary, func() {
+		for _, p := range proxies {
+			p.Stop()
+		}
+		for _, p := range udpProxies {
+			p.Stop()
+		}
+		dummy.Cleanup()
+	})
 
 	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
@@ -635,10 +604,6 @@ func validateDomain(domain string) bool {
 		return false
 	}
 	return domainRegex.MatchString(domain)
-}
-
-func validateIP(ip string) bool {
-	return net.ParseIP(ip) != nil
 }
 
 func validateIPv4(ip string) bool {

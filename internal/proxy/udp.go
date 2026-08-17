@@ -120,25 +120,18 @@ func (p *UDPProxy) handlePacket(clientAddr *net.UDPAddr, data []byte) {
 		proto = "UDP"
 	}
 
-	// Find backend
-	mapping := p.cfg.Lookup(domain, p.port)
+	// Find backend (case-insensitive)
+	mapping := p.cfg.LookupFold(domain, p.port)
 	if mapping == nil {
-		mapping = p.cfg.LookupByDomain(domain)
+		mapping = p.cfg.LookupByDomainFold(domain)
 		if mapping == nil {
 			log.Printf("[UDP] [%s] %s -> no mapping", proto, domain)
 			return
 		}
 	}
 
-	// Choose backend based on client IP version
-	useIPv6 := clientAddr.IP.To4() == nil
-	clientVer := "IPv4"
-	if useIPv6 {
-		clientVer = "IPv6"
-	}
-
-	backendAddr := mapping.GetBackendAddr(useIPv6)
-	log.Printf("[UDP] [%s] %s (%s) -> %s", proto, domain, clientVer, backendAddr)
+	backendAddr := mapping.GetBackendAddr()
+	log.Printf("[UDP] [%s] %s -> %s", proto, domain, backendAddr)
 
 	// Connect to backend
 	udpBackend, err := net.ResolveUDPAddr("udp", backendAddr)

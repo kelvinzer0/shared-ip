@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
 type DomainMapping struct {
-	Domain      string `json:"domain"`
-	Port        int    `json:"port"`
-	LocalIPv4   string `json:"local_ipv4,omitempty"`
-	LocalIPv6   string `json:"local_ipv6,omitempty"`
-	BackendPort int    `json:"backend_port,omitempty"` // if 0, use Port
-	DummyIF     string `json:"dummy_interface,omitempty"`
+	Domain    string `json:"domain"`
+	Port      int    `json:"port"`                // listen & backend port
+	LocalIPv4 string `json:"local_ipv4,omitempty"`
+	LocalIPv6 string `json:"local_ipv6,omitempty"`
+	DummyIF   string `json:"dummy_interface,omitempty"`
 }
 
 type Config struct {
@@ -150,7 +150,7 @@ func (c *Config) GetUniquePorts() []int {
 	return ports
 }
 
-// Lookup finds a mapping by domain and port (fast for proxy use)
+// Lookup finds a mapping by domain and port (case-sensitive).
 func (c *Config) Lookup(domain string, port int) *DomainMapping {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -163,39 +163,33 @@ func (c *Config) Lookup(domain string, port int) *DomainMapping {
 	return nil
 }
 
-// GetBackendPort returns the effective backend port
-func (dm *DomainMapping) GetBackendPort() int {
-	if dm.BackendPort > 0 {
-		return dm.BackendPort
+// LookupFold finds a mapping by domain and port (case-insensitive).
+func (c *Config) LookupFold(domain string, port int) *DomainMapping {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for i := range c.Domains {
+		if strings.EqualFold(c.Domains[i].Domain, domain) && c.Domains[i].Port == port {
+			return &c.Domains[i]
+		}
 	}
-	return dm.Port
+	return nil
 }
 
-// GetBackendAddr returns the backend address for the given IP version.
-// Prefers the matching version (IPv6 client → IPv6 backend, IPv4 client → IPv4 backend).
-// Falls back to whichever is available if the preferred version is not configured.
-func (dm *DomainMapping) GetBackendAddr(useIPv6 bool) string {
-	port := dm.GetBackendPort()
-
-	if useIPv6 {
-		// IPv6 client → prefer IPv6, fallback to IPv4
-		if dm.LocalIPv6 != "" {
-			return fmt.Sprintf("[%s]:%d", dm.LocalIPv6, port)
-		}
-		if dm.LocalIPv4 != "" {
-			return fmt.Sprintf("%s:%d", dm.LocalIPv4, port)
-		}
-	} else {
-		// IPv4 client → prefer IPv4, fallback to IPv6
-		if dm.LocalIPv4 != "" {
-			return fmt.Sprintf("%s:%d", dm.LocalIPv4, port)
-		}
-		if dm.LocalIPv6 != "" {
-			return fmt.Sprintf("[%s]:%d", dm.LocalIPv6, port)
-		}
+// GetBackendAddr returns the backend address to connect to.
+//
+// Uses whichever address is configured (IPv6 preferred, then IPv4),
+// on the same port as the frontend listener.
+func (dm *DomainMapping) GetBackendAddr() string {
+	if dm.LocalIPv6 != "" {
+		return fmt.Sprintf("[%s]:%d", dm.LocalIPv6, dm.Port)
 	}
 
-	return fmt.Sprintf(":%d", port)
+	if dm.LocalIPv4 != "" {
+		return fmt.Sprintf("%s:%d", dm.LocalIPv4, dm.Port)
+	}
+
+	return fmt.Sprintf(":%d", dm.Port)
 }
 
 // HasIPv4 returns true if an IPv4 backend is configured
@@ -208,7 +202,7 @@ func (dm *DomainMapping) HasIPv6() bool {
 	return dm.LocalIPv6 != ""
 }
 
-// LookupByDomain finds the first mapping for a domain on any port
+// LookupByDomain finds the first mapping for a domain on any port (case-sensitive).
 func (c *Config) LookupByDomain(domain string) *DomainMapping {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -219,6 +213,32 @@ func (c *Config) LookupByDomain(domain string) *DomainMapping {
 		}
 	}
 	return nil
+}
+
+// LookupByDomainFold finds the first mapping for a domain on any port (case-insensitive).
+func (c *Config) LookupByDomainFold(domain string) *DomainMapping {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for i := range c.Domains {
+		if strings.EqualFold(c.Domains[i].Domain, domain) {
+			return &c.Domains[i]
+		}
+	}
+	return nil
+}
+
+// GetFirstDomain returns the first domain for a given port (used for SMTP banner).
+func (c *Config) GetFirstDomain(port int) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, d := range c.Domains {
+		if d.Port == port {
+			return d.Domain
+		}
+	}
+	return ""
 }
 
 // GetByPort returns all mappings for a given port
