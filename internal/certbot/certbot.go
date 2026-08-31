@@ -2,6 +2,7 @@ package certbot
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,8 +38,17 @@ func HasCerts(domain string) bool {
 	return errCert == nil && errKey == nil
 }
 
+func isPortOpen(port string) bool {
+	ln, err := net.Listen("tcp", ":"+port)
+	if err == nil {
+		ln.Close()
+		return true
+	}
+	return false
+}
+
 // RequestCert runs certbot to obtain a certificate for the given domain.
-// Uses webroot mode — the proxy serves ACME challenges from WebrootDir.
+// Uses standalone mode if port 80 is free, otherwise webroot mode (proxy serves ACME challenges).
 //
 // Parameters:
 //   - domain: the domain to request a certificate for
@@ -47,21 +57,26 @@ func HasCerts(domain string) bool {
 //
 // Requires:
 //   - certbot installed and available in PATH
-//   - Port 80 accessible from the internet (proxy serves ACME challenges)
+//   - Port 80 accessible from the internet
 //   - Root privileges (to write to /etc/letsencrypt)
 func RequestCert(domain, email string, staging bool) error {
-	// Ensure webroot directory exists
-	if err := os.MkdirAll(WebrootDir, 0755); err != nil {
-		return fmt.Errorf("create webroot %s: %w", WebrootDir, err)
-	}
-
 	args := []string{
 		"certonly",
 		"--non-interactive",
 		"--agree-tos",
-		"--webroot",
-		"-w", WebrootDir,
 		"-d", domain,
+	}
+
+	if isPortOpen("80") {
+		fmt.Println("[CERTBOT] Port 80 is free, using --standalone mode")
+		args = append(args, "--standalone")
+	} else {
+		fmt.Println("[CERTBOT] Port 80 is in use, using --webroot mode")
+		// Ensure webroot directory exists
+		if err := os.MkdirAll(WebrootDir, 0755); err != nil {
+			return fmt.Errorf("create webroot %s: %w", WebrootDir, err)
+		}
+		args = append(args, "--webroot", "-w", WebrootDir)
 	}
 
 	if email != "" {
