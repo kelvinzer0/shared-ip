@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -246,6 +247,13 @@ func (p *TCPProxy) routeConnection(clientConn net.Conn, firstPacket []byte, doma
 	}
 
 	backendAddr := mapping.GetBackendAddr()
+
+	// TLS termination: if domain has certs, terminate TLS and forward plain TCP
+	if mapping.HasTLS() && protocol == "tls" {
+		p.handleTLSTermination(clientConn, firstPacket, domain, backendAddr, mapping)
+		return
+	}
+
 	log.Printf("[TCP] [%s] %s -> %s", proto, domain, backendAddr)
 
 	// Use transparent proxy to preserve client source IP
@@ -263,6 +271,64 @@ func (p *TCPProxy) routeConnection(clientConn net.Conn, firstPacket []byte, doma
 
 	bidirectionalCopy(clientConn, backendConn)
 }
+
+// handleTLSTermination terminates TLS on the proxy and forwards plain TCP to backend.
+func (p *TCPProxy) handleTLSTermination(clientConn net.Conn, firstPacket []byte, domain, backendAddr string, mapping *config.DomainMapping) {
+	cert, err := tls.LoadX509KeyPair(mapping.CertPath, mapping.KeyPath)
+	if err != nil {
+		log.Printf("[TLS] Load cert for %s: %v", domain, err)
+		return
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	// Wrap the connection: replay firstPacket then rest of stream
+	reader := &connReplayer{first: firstPacket, rest: clientConn}
+	tlsConn := tls.Server(reader, tlsConfig)
+
+	// Complete TLS handshake
+	if err := tlsConn.Handshake(); err != nil {
+		log.Printf("[TLS] Handshake failed for %s: %v", domain, err)
+		return
+	}
+
+	log.Printf("[TLS] %s -> %s (TLS terminated)", domain, backendAddr)
+
+	// Connect to backend (plain TCP, no TLS)
+	backendConn, err := DialTransparentFallback(backendAddr, clientConn.RemoteAddr())
+	if err != nil {
+		log.Printf("[TLS] Backend connect error %s: %v", backendAddr, err)
+		return
+	}
+	defer backendConn.Close()
+
+	bidirectionalCopy(tlsConn, backendConn)
+}
+
+// connReplayer replays buffered data then reads from the underlying connection.
+type connReplayer struct {
+	first []byte
+	rest  net.Conn
+}
+
+func (r *connReplayer) Read(p []byte) (int, error) {
+	if len(r.first) > 0 {
+		n := copy(p, r.first)
+		r.first = r.first[n:]
+		return n, nil
+	}
+	return r.rest.Read(p)
+}
+
+func (r *connReplayer) Write(p []byte) (int, error)  { return r.rest.Write(p) }
+func (r *connReplayer) Close() error                  { return r.rest.Close() }
+func (r *connReplayer) LocalAddr() net.Addr           { return r.rest.LocalAddr() }
+func (r *connReplayer) RemoteAddr() net.Addr          { return r.rest.RemoteAddr() }
+func (r *connReplayer) SetDeadline(t time.Time) error { return r.rest.SetDeadline(t) }
+func (r *connReplayer) SetReadDeadline(t time.Time) error  { return r.rest.SetReadDeadline(t) }
+func (r *connReplayer) SetWriteDeadline(t time.Time) error { return r.rest.SetWriteDeadline(t) }
 
 // bidirectionalCopy copies data in both directions and waits for both to finish.
 // Uses CloseWrite() to signal EOF per direction without closing the connection.

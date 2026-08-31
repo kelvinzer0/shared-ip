@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"shared-ip/internal/certbot"
 	"shared-ip/internal/config"
 	"shared-ip/internal/dummy"
 	"shared-ip/internal/proxy"
@@ -89,7 +90,7 @@ USAGE:
   shared-ip <command> [options]
 
 COMMANDS:
-  add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>]
+  add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>] [--certbot] [--certbot-email=<email>] [--certbot-staging]
   list
   show <domain> --localport=<port>
   update <domain> --localport=<port> [--localipv4=<ip>] [--localipv6=<ip>] [--clear-ipv4] [--clear-ipv6]
@@ -105,6 +106,9 @@ OPTIONS:
                        shared-ip also listens on this port.
   --localipv4=<ip>     Backend IPv4 address (creates dummy interface)
   --localipv6=<ip>     Backend IPv6 address (creates dummy interface)
+  --certbot            Auto-obtain TLS certificate via Let's Encrypt certbot
+  --certbot-email=<e>  Email for Let's Encrypt notifications
+  --certbot-staging    Use Let's Encrypt staging (test) environment
   --clear-ipv4         Remove IPv4 (update only)
   --clear-ipv6         Remove IPv6 (update only)
 
@@ -133,7 +137,7 @@ DNS SETUP:
 
 func handleAdd(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: shared-ip add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>]")
+		fmt.Fprintln(os.Stderr, "Usage: shared-ip add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>] [--certbot] [--certbot-email=<email>] [--certbot-staging]")
 		os.Exit(1)
 	}
 
@@ -141,6 +145,9 @@ func handleAdd(args []string) {
 	port := 80
 	localIPv4 := ""
 	localIPv6 := ""
+	useCertbot := false
+	certbotEmail := ""
+	certbotStaging := false
 
 	for _, arg := range args[1:] {
 		k, v := parseFlag(arg)
@@ -156,6 +163,12 @@ func handleAdd(args []string) {
 			localIPv4 = v
 		case "localipv6":
 			localIPv6 = v
+		case "certbot":
+			useCertbot = true
+		case "certbot-email":
+			certbotEmail = v
+		case "certbot-staging":
+			certbotStaging = true
 		}
 	}
 
@@ -210,6 +223,36 @@ func handleAdd(args []string) {
 	if err := cfg.Add(dm); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Auto-certbot: obtain TLS certificate
+	if useCertbot {
+		if !certbot.HasCerts(domain) {
+			fmt.Printf("[CERTBOT] Requesting certificate for %s...\n", domain)
+			if err := certbot.RequestCert(domain, certbotEmail, certbotStaging); err != nil {
+				fmt.Fprintf(os.Stderr, "[CERTBOT] Warning: certificate request failed: %v\n", err)
+				fmt.Fprintln(os.Stderr, "[CERTBOT] Domain mapping saved without TLS. You can retry with:")
+				fmt.Fprintf(os.Stderr, "  certbot certonly --webroot -w %s -d %s\n", certbot.WebrootPath(), domain)
+			} else {
+				paths := certbot.GetCertPaths(domain)
+				dm.CertPath = paths.Cert
+				dm.KeyPath = paths.Key
+				if err := cfg.Update(dm); err != nil {
+					fmt.Fprintf(os.Stderr, "[CERTBOT] Warning: failed to save cert paths to config: %v\n", err)
+				} else {
+					fmt.Printf("[CERTBOT] TLS enabled for %s\n", domain)
+				}
+			}
+		} else {
+			paths := certbot.GetCertPaths(domain)
+			dm.CertPath = paths.Cert
+			dm.KeyPath = paths.Key
+			if err := cfg.Update(dm); err != nil {
+				fmt.Fprintf(os.Stderr, "[CERTBOT] Warning: failed to save cert paths to config: %v\n", err)
+			} else {
+				fmt.Printf("[CERTBOT] Using existing certificate for %s\n", domain)
+			}
+		}
 	}
 
 	fmt.Printf("Added: %s --localport=%d", domain, port)

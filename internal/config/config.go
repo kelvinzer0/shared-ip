@@ -15,6 +15,8 @@ type DomainMapping struct {
 	LocalIPv4 string `json:"local_ipv4,omitempty"`
 	LocalIPv6 string `json:"local_ipv6,omitempty"`
 	DummyIF   string `json:"dummy_interface,omitempty"`
+	CertPath  string `json:"cert_path,omitempty"`  // TLS certificate (fullchain.pem)
+	KeyPath   string `json:"key_path,omitempty"`   // TLS private key (privkey.pem)
 }
 
 type Config struct {
@@ -85,6 +87,12 @@ func (c *Config) Update(dm DomainMapping) error {
 			c.Domains[i].LocalIPv6 = dm.LocalIPv6
 			if dm.DummyIF != "" {
 				c.Domains[i].DummyIF = dm.DummyIF
+			}
+			if dm.CertPath != "" {
+				c.Domains[i].CertPath = dm.CertPath
+			}
+			if dm.KeyPath != "" {
+				c.Domains[i].KeyPath = dm.KeyPath
 			}
 			return c.saveUnsafe()
 		}
@@ -190,6 +198,11 @@ func (dm *DomainMapping) GetBackendAddr() string {
 	}
 
 	return fmt.Sprintf(":%d", dm.Port)
+}
+
+// HasTLS returns true if both cert and key paths are configured.
+func (dm *DomainMapping) HasTLS() bool {
+	return dm.CertPath != "" && dm.KeyPath != ""
 }
 
 // HasIPv4 returns true if an IPv4 backend is configured
