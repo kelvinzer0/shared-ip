@@ -59,14 +59,17 @@ sudo shared-ip add myapp.com --localport=8080 --localipv6=::1
 # 3. Dual-stack (IPv4 + IPv6 backends)
 sudo shared-ip add myapp.com --localport=443 --localipv4=10.0.0.5 --localipv6=fd00::1
 
-# 4. Start
+# 4. With auto HTTPS (certbot)
+sudo shared-ip add myapp.com --localport=80 --localipv4=192.168.1.10 --certbot --certbot-email=you@email.com
+
+# 5. Start
 sudo service shared-ip start
 ```
 
 ## CLI Commands
 
 ```
-shared-ip add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>]
+shared-ip add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>] [--certbot] [--certbot-email=<email>] [--certbot-staging] [--tls-terminate]
 shared-ip list
 shared-ip show <domain> --localport=<port>
 shared-ip update <domain> --localport=<port> [--localipv4=<ip>] [--localipv6=<ip>] [--clear-ipv4] [--clear-ipv6]
@@ -84,6 +87,10 @@ shared-ip version
 | `--localport=<port>` | Port where your service listens. shared-ip also listens on this port (default: 80) |
 | `--localipv4=<ip>` | Backend IPv4 address. Creates per-domain dummy interface (`sip-<name>`) |
 | `--localipv6=<ip>` | Backend IPv6 address. Creates per-domain dummy interface |
+| `--certbot` | Auto-obtain TLS certificate via Let's Encrypt (webroot mode) |
+| `--certbot-email=<e>` | Email for Let's Encrypt notifications |
+| `--certbot-staging` | Use Let's Encrypt staging environment (for testing) |
+| `--tls-terminate` | Terminate TLS at proxy, forward plain TCP to backend (default: passthrough) |
 | `--clear-ipv4` | Remove IPv4 from mapping (update only) |
 | `--clear-ipv6` | Remove IPv6 from mapping (update only) |
 
@@ -104,6 +111,15 @@ sudo shared-ip add b.com --localport=80 --localipv4=10.0.0.5
 sudo shared-ip add frontend.com --localport=80 --localipv4=10.0.0.5
 sudo shared-ip add api.com --localport=80 --localipv4=10.0.0.6
 
+# Auto HTTPS with certbot
+sudo shared-ip add app.com --localport=80 --localipv4=10.0.0.5 --certbot --certbot-email=admin@app.com
+
+# Auto HTTPS with TLS termination (proxy decrypts, backend receives plain HTTP)
+sudo shared-ip add app.com --localport=8080 --localipv4=10.0.0.5 --certbot --tls-terminate
+
+# Test with staging certs first
+sudo shared-ip add app.com --localport=80 --localipv4=10.0.0.5 --certbot --certbot-staging
+
 # Update mapping
 sudo shared-ip update app.com --localport=80 --localipv4=10.0.0.99
 
@@ -112,6 +128,56 @@ sudo shared-ip delete app.com --localport=80
 
 # View all mappings
 sudo shared-ip list
+```
+
+## Auto HTTPS (Certbot)
+
+shared-ip can automatically obtain and configure TLS certificates from Let's Encrypt using certbot.
+
+### How It Works
+
+1. `shared-ip add --certbot` requests a certificate via HTTP-01 challenge
+2. The proxy serves ACME challenge tokens at `/.well-known/acme-challenge/` on port 80
+3. Certificates are stored at `/etc/letsencrypt/live/<domain>/`
+4. Certificate paths are saved in the config for automatic use
+
+### TLS Modes
+
+**Passthrough (default):** Proxy forwards raw TCP (including TLS) to backend. Backend handles TLS termination.
+
+```
+Client ──TLS──▶ Proxy ──TLS──▶ Backend:443
+```
+
+```bash
+sudo shared-ip add app.com --localport=443 --localipv4=10.0.0.5 --certbot
+# Backend nginx/caddy handles TLS on port 443
+```
+
+**Termination (`--tls-terminate`):** Proxy terminates TLS, forwards plain TCP to backend.
+
+```
+Client ──TLS──▶ Proxy ──plain TCP──▶ Backend:8080
+```
+
+```bash
+sudo shared-ip add app.com --localport=8080 --localipv4=10.0.0.5 --certbot --tls-terminate
+# Backend receives plain HTTP on port 8080
+```
+
+### Prerequisites
+
+- `certbot` installed (`apt install certbot` or `snap install certbot`)
+- Port 80 accessible from the internet (for HTTP-01 challenge)
+- Root privileges (for certificate storage)
+
+### Certificate Renewal
+
+Certificates auto-renew via certbot's systemd timer. To manually renew:
+
+```bash
+sudo certbot renew
+sudo service shared-ip restart  # reload certs
 ```
 
 ## DNS Setup
@@ -177,6 +243,14 @@ sip-api-com      → 10.0.0.5
 
 Web servers can bind directly to the assigned IPs. Cleanup is per-domain.
 
+### TLS Certificate Caching
+
+TLS certificates are cached in memory after first load. No disk I/O per connection.
+
+### ACME Challenge Serving
+
+The proxy serves HTTP-01 challenge tokens inline — no separate web server needed for certbot. Works while the daemon is running.
+
 ## Service Management
 
 ```bash
@@ -201,7 +275,10 @@ Config is stored at `/etc/shared-ip/config.json`:
     "port": 8080,
     "local_ipv4": "",
     "local_ipv6": "::1",
-    "dummy_interface": "sip-myapp-com"
+    "dummy_interface": "sip-myapp-com",
+    "cert_path": "/etc/letsencrypt/live/myapp.com/fullchain.pem",
+    "key_path": "/etc/letsencrypt/live/myapp.com/privkey.pem",
+    "tls_terminate": false
   }
 ]
 ```
