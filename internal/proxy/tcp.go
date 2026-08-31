@@ -110,6 +110,11 @@ func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 			return
 		}
 
+		// Check for ACME challenge early (before domain extraction)
+		if previewLen >= 20 && serveACMEChallenge(clientConn, preview[:previewLen]) {
+			return
+		}
+
 		result := extractor.ExtractDomainIncremental(preview[:previewLen])
 
 		if result.Done {
@@ -182,26 +187,7 @@ func (p *TCPProxy) handleSMTP(clientConn net.Conn) {
 			backendAddr := mapping.GetBackendAddr()
 			log.Printf("[SMTP] %s -> %s", rcptDomain, backendAddr)
 
-			backendConn, err := DialTransparentFallback(backendAddr, clientConn.RemoteAddr())
-			if err != nil {
-				log.Printf("[SMTP] Backend connect error %s: %v", backendAddr, err)
-				return
-			}
-			defer backendConn.Close()
-
-			// Step 4: Eat server's replies
-			if _, err := smtplib.EatSMTP(backendConn); err != nil {
-				log.Printf("[SMTP] EatSMTP error: %v", err)
-				return
-			}
-
-			// Step 5: Forward buffered client data + bidirectional copy
-			if _, err := backendConn.Write(buf[:bufLen]); err != nil {
-				log.Printf("[SMTP] Forward error: %v", err)
-				return
-			}
-
-			bidirectionalCopy(clientConn, backendConn)
+			p.handleSMTPForward(clientConn, buf[:bufLen], backendAddr)
 			return
 		}
 
@@ -248,8 +234,8 @@ func (p *TCPProxy) routeConnection(clientConn net.Conn, firstPacket []byte, doma
 
 	backendAddr := mapping.GetBackendAddr()
 
-	// TLS termination: if domain has certs, terminate TLS and forward plain TCP
-	if mapping.HasTLS() && protocol == "tls" {
+	// TLS termination: if domain has certs and TLSTerminate flag, terminate TLS
+	if mapping.ShouldTerminateTLS() && protocol == "tls" {
 		p.handleTLSTermination(clientConn, firstPacket, domain, backendAddr, mapping)
 		return
 	}
@@ -272,27 +258,40 @@ func (p *TCPProxy) routeConnection(clientConn net.Conn, firstPacket []byte, doma
 	bidirectionalCopy(clientConn, backendConn)
 }
 
+// certCache caches loaded TLS certificates to avoid disk I/O on every connection.
+var certCache sync.Map // domain -> *tls.Certificate
+
 // handleTLSTermination terminates TLS on the proxy and forwards plain TCP to backend.
 func (p *TCPProxy) handleTLSTermination(clientConn net.Conn, firstPacket []byte, domain, backendAddr string, mapping *config.DomainMapping) {
-	cert, err := tls.LoadX509KeyPair(mapping.CertPath, mapping.KeyPath)
-	if err != nil {
-		log.Printf("[TLS] Load cert for %s: %v", domain, err)
-		return
+	// Load cert from cache or disk
+	var cert *tls.Certificate
+	if cached, ok := certCache.Load(domain); ok {
+		cert = cached.(*tls.Certificate)
+	} else {
+		c, err := tls.LoadX509KeyPair(mapping.CertPath, mapping.KeyPath)
+		if err != nil {
+			log.Printf("[TLS] Load cert for %s: %v", domain, err)
+			return
+		}
+		cert = &c
+		certCache.Store(domain, cert)
 	}
 
 	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
+		Certificates: []tls.Certificate{*cert},
 	}
 
 	// Wrap the connection: replay firstPacket then rest of stream
 	reader := &connReplayer{first: firstPacket, rest: clientConn}
 	tlsConn := tls.Server(reader, tlsConfig)
 
-	// Complete TLS handshake
+	// Set handshake deadline to prevent hanging connections
+	clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	if err := tlsConn.Handshake(); err != nil {
 		log.Printf("[TLS] Handshake failed for %s: %v", domain, err)
 		return
 	}
+	clientConn.SetReadDeadline(time.Time{}) // reset deadline
 
 	log.Printf("[TLS] %s -> %s (TLS terminated)", domain, backendAddr)
 
@@ -329,6 +328,31 @@ func (r *connReplayer) RemoteAddr() net.Addr          { return r.rest.RemoteAddr
 func (r *connReplayer) SetDeadline(t time.Time) error { return r.rest.SetDeadline(t) }
 func (r *connReplayer) SetReadDeadline(t time.Time) error  { return r.rest.SetReadDeadline(t) }
 func (r *connReplayer) SetWriteDeadline(t time.Time) error { return r.rest.SetWriteDeadline(t) }
+
+// handleSMTPForward connects to backend, eats SMTP replies, and forwards.
+// Separated from handleSMTP to avoid defer-in-loop bug.
+func (p *TCPProxy) handleSMTPForward(clientConn net.Conn, buf []byte, backendAddr string) {
+	backendConn, err := DialTransparentFallback(backendAddr, clientConn.RemoteAddr())
+	if err != nil {
+		log.Printf("[SMTP] Backend connect error %s: %v", backendAddr, err)
+		return
+	}
+	defer backendConn.Close()
+
+	// Eat server's replies (220+250+250)
+	if _, err := smtplib.EatSMTP(backendConn); err != nil {
+		log.Printf("[SMTP] EatSMTP error: %v", err)
+		return
+	}
+
+	// Forward buffered client data + bidirectional copy
+	if _, err := backendConn.Write(buf); err != nil {
+		log.Printf("[SMTP] Forward error: %v", err)
+		return
+	}
+
+	bidirectionalCopy(clientConn, backendConn)
+}
 
 // bidirectionalCopy copies data in both directions and waits for both to finish.
 // Uses CloseWrite() to signal EOF per direction without closing the connection.

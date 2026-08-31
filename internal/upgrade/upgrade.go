@@ -130,21 +130,18 @@ func HandleSIGHUP(binary string, cleanup func()) {
 
 		log.Println("[UPGRADE] New process started, waiting for it to take over...")
 
-		// Wait a bit for the new process to start accepting
-		// (it will signal us with SIGTERM when ready)
-		go func() {
-			// If we don't get SIGTERM within 30s, something went wrong
-			timer := time.NewTimer(30 * time.Second)
-			<-timer.C
-			log.Println("[UPGRADE] Timeout waiting for new process, continuing")
-		}()
-
-		// Keep running until SIGTERM from child
+		// Wait for SIGTERM from child or timeout
 		termSig := make(chan os.Signal, 1)
 		signal.Notify(termSig, syscall.SIGTERM)
-		<-termSig
 
-		log.Println("[UPGRADE] Received SIGTERM from new process, shutting down...")
+		select {
+		case <-termSig:
+			log.Println("[UPGRADE] Received SIGTERM from new process, shutting down...")
+		case <-time.After(30 * time.Second):
+			log.Println("[UPGRADE] Timeout waiting for new process, continuing")
+		}
+
+		signal.Stop(termSig)
 		if cleanup != nil {
 			cleanup()
 		}

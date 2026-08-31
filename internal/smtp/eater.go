@@ -73,24 +73,25 @@ func EatSMTP(server io.Reader) (int, error) {
 
 // eatSMTPReply reads a single SMTP reply with the expected code.
 // Handles multi-line replies (code followed by '-' means more lines).
+// Also handles multi-line 220 banners (e.g., "220-mail.example.com\r\n220 Ready").
 func eatSMTPReply(r io.Reader, expectedCode int) (int, error) {
 	codeStr := fmt.Sprintf("%03d", expectedCode)
 	buf := make([]byte, 1)
 	n := 0
 
-	// Read the 3-digit code
-	codeBytes := make([]byte, 3)
-	nn, err := io.ReadFull(r, codeBytes)
-	n += nn
-	if err != nil {
-		return n, err
-	}
-	if string(codeBytes) != codeStr {
-		return n, fmt.Errorf("expected code %s, got %s", codeStr, string(codeBytes))
-	}
-
-	// Read separator: space = last line, hyphen = more lines
 	for {
+		// Read the 3-digit code
+		codeBytes := make([]byte, 3)
+		nn, err := io.ReadFull(r, codeBytes)
+		n += nn
+		if err != nil {
+			return n, err
+		}
+		if string(codeBytes) != codeStr {
+			return n, fmt.Errorf("expected code %s, got %s", codeStr, string(codeBytes))
+		}
+
+		// Read separator: space = last line, hyphen = more lines
 		nn, err = io.ReadFull(r, buf)
 		n += nn
 		if err != nil {
@@ -105,20 +106,13 @@ func eatSMTPReply(r io.Reader, expectedCode int) (int, error) {
 		}
 
 		if buf[0] == '-' {
-			// More lines — read to end of line, then read next code
+			// More lines — read to end of line, then read next line
 			nn, err = eatUntil(r, '\n')
 			n += nn
 			if err != nil {
 				return n, err
 			}
-			// Read next line's code (3 digits)
-			codeBytes2 := make([]byte, 3)
-			nn, err = io.ReadFull(r, codeBytes2)
-			n += nn
-			if err != nil {
-				return n, err
-			}
-			// Continue loop to check separator
+			// Continue to read next line's code
 			continue
 		}
 

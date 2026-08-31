@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"shared-ip/internal/config"
@@ -162,10 +163,12 @@ func (p *UDPProxy) handlePacket(clientAddr *net.UDPAddr, data []byte) {
 	}
 
 	// Start reading responses from backend
-	go p.readBackend(clientAddr, sess)
+	// Use the backend IP as source for transparent responses
+	srcIP := net.ParseIP(backendAddr[:strings.LastIndex(backendAddr, ":")])
+	go p.readBackend(clientAddr, sess, srcIP)
 }
 
-func (p *UDPProxy) readBackend(clientAddr *net.UDPAddr, sess *udpSession) {
+func (p *UDPProxy) readBackend(clientAddr *net.UDPAddr, sess *udpSession, srcIP net.IP) {
 	defer func() {
 		sess.backendConn.Close()
 		p.sessions.Delete(clientAddr.String())
@@ -180,10 +183,43 @@ func (p *UDPProxy) readBackend(clientAddr *net.UDPAddr, sess *udpSession) {
 		}
 
 		sess.lastActive = time.Now()
+
+		// Try to send response with spoofed source IP (IP_TRANSPARENT)
+		if srcIP != nil && srcIP.To4() != nil {
+			err = p.writeTransparentUDP(buf[:n], clientAddr, srcIP)
+			if err == nil {
+				continue
+			}
+		}
+
+		// Fallback to normal write
 		if _, err := p.conn.WriteToUDP(buf[:n], clientAddr); err != nil {
 			return
 		}
 	}
+}
+
+// writeTransparentUDP sends a UDP packet with a spoofed source address.
+func (p *UDPProxy) writeTransparentUDP(data []byte, dst *net.UDPAddr, srcIP net.IP) error {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+
+	if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, IP_TRANSPARENT, 1); err != nil {
+		return err
+	}
+
+	sa := &syscall.SockaddrInet4{Port: p.port}
+	copy(sa.Addr[:], srcIP.To4())
+	if err := syscall.Bind(fd, sa); err != nil {
+		return err
+	}
+
+	dstSA := &syscall.SockaddrInet4{Port: dst.Port}
+	copy(dstSA.Addr[:], dst.IP.To4())
+	return syscall.Sendto(fd, data, 0, dstSA)
 }
 
 func (p *UDPProxy) cleanupLoop() {

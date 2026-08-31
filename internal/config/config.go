@@ -10,13 +10,14 @@ import (
 )
 
 type DomainMapping struct {
-	Domain    string `json:"domain"`
-	Port      int    `json:"port"`                // listen & backend port
-	LocalIPv4 string `json:"local_ipv4,omitempty"`
-	LocalIPv6 string `json:"local_ipv6,omitempty"`
-	DummyIF   string `json:"dummy_interface,omitempty"`
-	CertPath  string `json:"cert_path,omitempty"`  // TLS certificate (fullchain.pem)
-	KeyPath   string `json:"key_path,omitempty"`   // TLS private key (privkey.pem)
+	Domain      string `json:"domain"`
+	Port        int    `json:"port"`                // listen & backend port
+	LocalIPv4   string `json:"local_ipv4,omitempty"`
+	LocalIPv6   string `json:"local_ipv6,omitempty"`
+	DummyIF     string `json:"dummy_interface,omitempty"`
+	CertPath    string `json:"cert_path,omitempty"`    // TLS certificate (fullchain.pem)
+	KeyPath     string `json:"key_path,omitempty"`     // TLS private key (privkey.pem)
+	TLSTerminate bool   `json:"tls_terminate,omitempty"` // true = terminate TLS at proxy, false = passthrough
 }
 
 type Config struct {
@@ -94,6 +95,7 @@ func (c *Config) Update(dm DomainMapping) error {
 			if dm.KeyPath != "" {
 				c.Domains[i].KeyPath = dm.KeyPath
 			}
+			c.Domains[i].TLSTerminate = dm.TLSTerminate
 			return c.saveUnsafe()
 		}
 	}
@@ -203,6 +205,12 @@ func (dm *DomainMapping) GetBackendAddr() string {
 // HasTLS returns true if both cert and key paths are configured.
 func (dm *DomainMapping) HasTLS() bool {
 	return dm.CertPath != "" && dm.KeyPath != ""
+}
+
+// ShouldTerminateTLS returns true if TLS should be terminated at the proxy.
+// Requires both certs and TLSTerminate flag.
+func (dm *DomainMapping) ShouldTerminateTLS() bool {
+	return dm.HasTLS() && dm.TLSTerminate
 }
 
 // HasIPv4 returns true if an IPv4 backend is configured

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"syscall"
+	"time"
 )
 
 // Linux-specific constants not defined in Go's syscall package.
@@ -81,7 +82,7 @@ func DialTransparentFallback(backendAddr string, clientAddr net.Addr) (net.Conn,
 	conn, err := DialTransparent(backendAddr, clientAddr)
 	if err != nil {
 		// Fallback: normal dial without source address preservation
-		conn, err = net.DialTimeout("tcp", backendAddr, 5000000000) // 5s
+		conn, err = net.DialTimeout("tcp", backendAddr, 5*time.Second)
 		if err != nil {
 			return nil, err
 		}

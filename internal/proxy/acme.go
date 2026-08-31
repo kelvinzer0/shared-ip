@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,75 +11,63 @@ import (
 	"shared-ip/internal/certbot"
 )
 
-// ACMEServer serves ACME HTTP-01 challenge tokens from the certbot webroot.
-// This runs on a separate port so certbot can validate domains even while
-// the main TCP proxy is running on port 80.
-type ACMEServer struct {
-	listener net.Listener
-	port     int
-}
-
-// NewACMEServer creates a new ACME challenge server on the given port.
-func NewACMEServer(port int) *ACMEServer {
-	return &ACMEServer{port: port}
-}
-
-// Start begins serving ACME challenges.
-func (s *ACMEServer) Start() error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleChallenge)
-
-	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("ACME server listen %s: %w", addr, err)
+// serveACMEChallenge checks if the preview data is an HTTP request for
+// /.well-known/acme-challenge/. If so, serves the token from the certbot
+// webroot and returns true. Returns false if not an ACME challenge.
+func serveACMEChallenge(conn net.Conn, data []byte) bool {
+	// Quick check: must be HTTP and contain acme-challenge path
+	if len(data) < 20 {
+		return false
 	}
-	s.listener = ln
 
-	go func() {
-		if err := http.Serve(ln, mux); err != nil && err != http.ErrServerClosed {
-			log.Printf("[ACME] Server error: %v", err)
+	// Check if it starts with an HTTP method
+	methods := []string{"GET ", "HEAD "}
+	isHTTP := false
+	for _, m := range methods {
+		if strings.HasPrefix(string(data), m) {
+			isHTTP = true
+			break
 		}
-	}()
-
-	log.Printf("[ACME] Challenge server listening on %s", addr)
-	return nil
-}
-
-// Stop shuts down the ACME server.
-func (s *ACMEServer) Stop() {
-	if s.listener != nil {
-		s.listener.Close()
 	}
-}
-
-// Port returns the port the server is listening on.
-func (s *ACMEServer) Port() int {
-	return s.port
-}
-
-// handleChallenge serves ACME challenge tokens from the webroot directory.
-func (s *ACMEServer) handleChallenge(w http.ResponseWriter, r *http.Request) {
-	// Only serve ACME challenge paths
-	if !strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
-		http.NotFound(w, r)
-		return
+	if !isHTTP {
+		return false
 	}
 
-	token := filepath.Base(r.URL.Path)
+	// Parse the request
+	reqStr := string(data)
+	lines := strings.SplitN(reqStr, "\r\n", 2)
+	if len(lines) == 0 {
+		return false
+	}
+
+	// Extract path from request line: "GET /.well-known/acme-challenge/TOKEN HTTP/1.1"
+	parts := strings.SplitN(lines[0], " ", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	path := parts[1]
+
+	if !strings.HasPrefix(path, "/.well-known/acme-challenge/") {
+		return false
+	}
+
+	token := filepath.Base(path)
 	if token == "" || token == "." || token == ".." || strings.Contains(token, "/") {
-		http.NotFound(w, r)
-		return
+		return false
 	}
 
-	tokenPath := filepath.Join(certbot.WebrootPath(), ".well-known", "acme-challenge", token)
-
-	data, err := os.ReadFile(tokenPath)
+	tokenPath := filepath.Join(certbot.WebrootDir, ".well-known", "acme-challenge", token)
+	data_bytes, err := os.ReadFile(tokenPath)
 	if err != nil {
-		http.NotFound(w, r)
-		return
+		log.Printf("[ACME] Token not found: %s", token)
+		return false
 	}
 
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(data)
+	// Send HTTP response
+	response := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		len(data_bytes), string(data_bytes))
+
+	conn.Write([]byte(response))
+	log.Printf("[ACME] Served challenge token for %s", token)
+	return true
 }

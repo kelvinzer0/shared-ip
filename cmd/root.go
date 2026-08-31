@@ -90,7 +90,7 @@ USAGE:
   shared-ip <command> [options]
 
 COMMANDS:
-  add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>] [--certbot] [--certbot-email=<email>] [--certbot-staging]
+  add <domain> --localport=<port> --localipv4=<ip> [--localipv6=<ip>] [--certbot] [--certbot-email=<email>] [--certbot-staging] [--tls-terminate]
   list
   show <domain> --localport=<port>
   update <domain> --localport=<port> [--localipv4=<ip>] [--localipv6=<ip>] [--clear-ipv4] [--clear-ipv6]
@@ -109,6 +109,7 @@ OPTIONS:
   --certbot            Auto-obtain TLS certificate via Let's Encrypt certbot
   --certbot-email=<e>  Email for Let's Encrypt notifications
   --certbot-staging    Use Let's Encrypt staging (test) environment
+  --tls-terminate      Terminate TLS at proxy (forward plain TCP to backend)
   --clear-ipv4         Remove IPv4 (update only)
   --clear-ipv6         Remove IPv6 (update only)
 
@@ -148,6 +149,7 @@ func handleAdd(args []string) {
 	useCertbot := false
 	certbotEmail := ""
 	certbotStaging := false
+	tlsTerminate := false
 
 	for _, arg := range args[1:] {
 		k, v := parseFlag(arg)
@@ -169,6 +171,8 @@ func handleAdd(args []string) {
 			certbotEmail = v
 		case "certbot-staging":
 			certbotStaging = true
+		case "tls-terminate":
+			tlsTerminate = true
 		}
 	}
 
@@ -213,11 +217,12 @@ func handleAdd(args []string) {
 	}
 
 	dm := config.DomainMapping{
-		Domain:    domain,
-		Port:      port,
-		LocalIPv4: localIPv4,
-		LocalIPv6: localIPv6,
-		DummyIF:   dummyIF,
+		Domain:       domain,
+		Port:         port,
+		LocalIPv4:    localIPv4,
+		LocalIPv6:    localIPv6,
+		DummyIF:      dummyIF,
+		TLSTerminate: tlsTerminate,
 	}
 
 	if err := cfg.Add(dm); err != nil {
@@ -232,7 +237,7 @@ func handleAdd(args []string) {
 			if err := certbot.RequestCert(domain, certbotEmail, certbotStaging); err != nil {
 				fmt.Fprintf(os.Stderr, "[CERTBOT] Warning: certificate request failed: %v\n", err)
 				fmt.Fprintln(os.Stderr, "[CERTBOT] Domain mapping saved without TLS. You can retry with:")
-				fmt.Fprintf(os.Stderr, "  certbot certonly --webroot -w %s -d %s\n", certbot.WebrootPath(), domain)
+				fmt.Fprintf(os.Stderr, "  certbot certonly --webroot -w %s -d %s\n", certbot.WebrootDir, domain)
 			} else {
 				paths := certbot.GetCertPaths(domain)
 				dm.CertPath = paths.Cert
