@@ -14,15 +14,16 @@ import (
 
 type UDPProxy struct {
 	cfg      *config.Config
-	conn     *net.UDPConn
+	conns    []*net.UDPConn
 	port     int
 	quit     chan struct{}
 	sessions sync.Map // clientAddr -> *udpSession
 }
 
 type udpSession struct {
-	backendConn *net.UDPConn
-	lastActive  time.Time
+	listenerConn *net.UDPConn
+	backendConn  *net.UDPConn
+	lastActive   time.Time
 }
 
 func NewUDPProxy(cfg *config.Config, port int) *UDPProxy {
@@ -34,30 +35,43 @@ func NewUDPProxy(cfg *config.Config, port int) *UDPProxy {
 }
 
 func (p *UDPProxy) Start() error {
-	// Listen on all interfaces. SO_REUSEPORT allows the proxy to bind here.
-	listenAddr := &net.UDPAddr{Port: p.port}
-	conn, err := listenUDPTransparent(listenAddr)
-	if err != nil {
-		// Fallback to normal listen
-		listenAddr = &net.UDPAddr{Port: p.port}
-		conn, err = net.ListenUDP("udp", listenAddr)
-		if err != nil {
-			return fmt.Errorf("udp listen :%d: %w", p.port, err)
-		}
+	pubAddrs := publicListenAddrs(p.port)
+	if len(pubAddrs) == 0 {
+		pubAddrs = []string{fmt.Sprintf(":%d", p.port)}
 	}
-	p.conn = conn
 
-	log.Printf("[UDP] Listening on %s (transparent)", listenAddr)
+	for _, addrStr := range pubAddrs {
+		udpAddr, err := net.ResolveUDPAddr("udp", addrStr)
+		if err != nil {
+			continue
+		}
+		conn, err := listenUDPTransparent(udpAddr)
+		if err != nil {
+			conn, err = net.ListenUDP("udp", udpAddr)
+			if err != nil {
+				log.Printf("[UDP] Listen %s: %v (skipping)", addrStr, err)
+				continue
+			}
+		}
+		p.conns = append(p.conns, conn)
+		log.Printf("[UDP] Listening on %s", addrStr)
+		go p.readLoop(conn)
+	}
 
-	go p.readLoop()
+	if len(p.conns) == 0 {
+		return fmt.Errorf("udp: could not listen on any address for port %d", p.port)
+	}
+
 	go p.cleanupLoop()
 	return nil
 }
 
 func (p *UDPProxy) Stop() {
 	close(p.quit)
-	if p.conn != nil {
-		p.conn.Close()
+	for _, conn := range p.conns {
+		if conn != nil {
+			conn.Close()
+		}
 	}
 	// Close all sessions
 	p.sessions.Range(func(key, value interface{}) bool {
@@ -68,10 +82,10 @@ func (p *UDPProxy) Stop() {
 	})
 }
 
-func (p *UDPProxy) readLoop() {
+func (p *UDPProxy) readLoop(conn *net.UDPConn) {
 	buf := make([]byte, 65535)
 	for {
-		n, clientAddr, err := p.conn.ReadFromUDP(buf)
+		n, clientAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			select {
 			case <-p.quit:
@@ -84,11 +98,11 @@ func (p *UDPProxy) readLoop() {
 
 		data := make([]byte, n)
 		copy(data, buf[:n])
-		go p.handlePacket(clientAddr, data)
+		go p.handlePacket(conn, clientAddr, data)
 	}
 }
 
-func (p *UDPProxy) handlePacket(clientAddr *net.UDPAddr, data []byte) {
+func (p *UDPProxy) handlePacket(listenerConn *net.UDPConn, clientAddr *net.UDPAddr, data []byte) {
 	sessionKey := clientAddr.String()
 
 	// Check existing session
@@ -147,8 +161,9 @@ func (p *UDPProxy) handlePacket(clientAddr *net.UDPAddr, data []byte) {
 	}
 
 	sess := &udpSession{
-		backendConn: backendConn,
-		lastActive:  time.Now(),
+		listenerConn: listenerConn,
+		backendConn:  backendConn,
+		lastActive:   time.Now(),
 	}
 	p.sessions.Store(sessionKey, sess)
 
@@ -182,7 +197,7 @@ func (p *UDPProxy) readBackend(clientAddr *net.UDPAddr, sess *udpSession, srcIP 
 
 		sess.lastActive = time.Now()
 
-		if _, err := p.conn.WriteToUDP(buf[:n], clientAddr); err != nil {
+		if _, err := sess.listenerConn.WriteToUDP(buf[:n], clientAddr); err != nil {
 			return
 		}
 	}
