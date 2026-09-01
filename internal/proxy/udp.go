@@ -6,7 +6,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"shared-ip/internal/config"
@@ -35,9 +34,8 @@ func NewUDPProxy(cfg *config.Config, port int) *UDPProxy {
 }
 
 func (p *UDPProxy) Start() error {
-	// Listen on [::] for true dual-stack (accepts both IPv4 and IPv6)
-	// Use IP_TRANSPARENT for UDP listener too
-	listenAddr := &net.UDPAddr{IP: net.ParseIP("127.127.127.127"), Port: p.port}
+	// Listen on all interfaces. SO_REUSEPORT allows the proxy to bind here.
+	listenAddr := &net.UDPAddr{Port: p.port}
 	conn, err := listenUDPTransparent(listenAddr)
 	if err != nil {
 		// Fallback to normal listen
@@ -184,42 +182,10 @@ func (p *UDPProxy) readBackend(clientAddr *net.UDPAddr, sess *udpSession, srcIP 
 
 		sess.lastActive = time.Now()
 
-		// Try to send response with spoofed source IP (IP_TRANSPARENT)
-		if srcIP != nil && srcIP.To4() != nil {
-			err = p.writeTransparentUDP(buf[:n], clientAddr, srcIP)
-			if err == nil {
-				continue
-			}
-		}
-
-		// Fallback to normal write
 		if _, err := p.conn.WriteToUDP(buf[:n], clientAddr); err != nil {
 			return
 		}
 	}
-}
-
-// writeTransparentUDP sends a UDP packet with a spoofed source address.
-func (p *UDPProxy) writeTransparentUDP(data []byte, dst *net.UDPAddr, srcIP net.IP) error {
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
-	if err != nil {
-		return err
-	}
-	defer syscall.Close(fd)
-
-	if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, IP_TRANSPARENT, 1); err != nil {
-		return err
-	}
-
-	sa := &syscall.SockaddrInet4{Port: p.port}
-	copy(sa.Addr[:], srcIP.To4())
-	if err := syscall.Bind(fd, sa); err != nil {
-		return err
-	}
-
-	dstSA := &syscall.SockaddrInet4{Port: dst.Port}
-	copy(dstSA.Addr[:], dst.IP.To4())
-	return syscall.Sendto(fd, data, 0, dstSA)
 }
 
 func (p *UDPProxy) cleanupLoop() {

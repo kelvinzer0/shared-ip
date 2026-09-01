@@ -38,12 +38,10 @@ func (p *TCPProxy) Start() error {
 		p.listener = ln
 		log.Printf("[TCP] Inherited listener on :%d", p.port)
 	} else {
-		// Use IP_TRANSPARENT to listen on a special address.
-		// This intercepts ALL traffic on this port regardless of destination IP,
-		// so the backend can bind to dummy interface IPs without conflict.
-		// Like uvhost: listen on 127.127.127.127:<port>
-		listenAddr := fmt.Sprintf("127.127.127.127:%d", p.port)
-		ln, err := ListenTransparentFallback("tcp4", listenAddr)
+		// Listen on all interfaces. SO_REUSEPORT allows the proxy to bind here
+		// while backend services bind to their specific dummy IPs on the same port.
+		listenAddr := fmt.Sprintf(":%d", p.port)
+		ln, err := ListenTransparentFallback("tcp", listenAddr)
 		if err != nil {
 			return fmt.Errorf("tcp listen %s: %w", listenAddr, err)
 		}

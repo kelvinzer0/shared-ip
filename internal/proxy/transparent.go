@@ -69,7 +69,9 @@ func DialTransparent(backendAddr string, clientAddr net.Addr) (net.Conn, error) 
 		},
 	}
 
-	conn, err := dialer.DialContext(context.Background(), network, backendAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, network, backendAddr)
 	if err != nil {
 		return nil, fmt.Errorf("transparent dial %s -> %s: %w", clientAddr, backendAddr, err)
 	}
