@@ -525,6 +525,15 @@ func handleReset() {
 
 func handleDaemon() {
 	log.Println("[DAEMON] Starting shared-ip daemon...")
+	// Recreate all dummy interfaces on startup
+	for _, d := range cfg.GetAll() {
+		if d.LocalIPv4 != "" {
+			dummy.Setup(d.Domain, d.LocalIPv4)
+		}
+		if d.LocalIPv6 != "" {
+			dummy.Setup(d.Domain, d.LocalIPv6)
+		}
+	}
 
 	proxies := make([]*proxy.TCPProxy, 0)
 	udpProxies := make([]*proxy.UDPProxy, 0)
