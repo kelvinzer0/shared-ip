@@ -16,11 +16,17 @@ import (
 	"shared-ip/internal/upgrade"
 )
 
+// TCPProxy listens on every public-facing IP (non-loopback, non-dummy) for a
+// given port and forwards connections to the appropriate backend.
+//
+// Listening only on public IPs means dummy interface IPs (e.g. 10.x.x.x,
+// fd00::x) assigned to backend services are never bound by the proxy,
+// so backends can freely bind to those IPs on the same port without conflict.
 type TCPProxy struct {
-	cfg      *config.Config
-	listener net.Listener
-	port     int
-	quit     chan struct{}
+	cfg       *config.Config
+	listeners []net.Listener
+	port      int
+	quit      chan struct{}
 }
 
 func NewTCPProxy(cfg *config.Config, port int) *TCPProxy {
@@ -32,40 +38,54 @@ func NewTCPProxy(cfg *config.Config, port int) *TCPProxy {
 }
 
 func (p *TCPProxy) Start() error {
-	// Try to inherit listener from parent (graceful upgrade)
 	listenerName := fmt.Sprintf("tcp-%d", p.port)
+
+	// Try to inherit listener from parent (graceful upgrade)
 	if ln := upgrade.InheritListener(listenerName); ln != nil {
-		p.listener = ln
+		p.listeners = append(p.listeners, ln)
 		log.Printf("[TCP] Inherited listener on :%d", p.port)
-	} else {
-		// Listen on all interfaces. SO_REUSEPORT allows the proxy to bind here
-		// while backend services bind to their specific dummy IPs on the same port.
-		listenAddr := fmt.Sprintf(":%d", p.port)
-		ln, err := ListenTransparentFallback("tcp", listenAddr)
-		if err != nil {
-			return fmt.Errorf("tcp listen %s: %w", listenAddr, err)
-		}
-		p.listener = ln
-		log.Printf("[TCP] Listening on %s (transparent)", listenAddr)
+		go p.acceptLoop(ln)
+		return nil
 	}
 
-	// Register for graceful upgrade
-	upgrade.SaveListener(listenerName, p.listener)
+	// Enumerate IPs on public-facing interfaces (excludes loopback + sip-* dummies).
+	pubAddrs := publicListenAddrs(p.port)
+	if len(pubAddrs) == 0 {
+		// Fallback: listen on all interfaces if no public IPs detected.
+		log.Printf("[TCP] No public IPs detected, falling back to 0.0.0.0:%d", p.port)
+		pubAddrs = []string{fmt.Sprintf(":%d", p.port)}
+	}
 
-	go p.acceptLoop()
+	for _, addr := range pubAddrs {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Printf("[TCP] Listen %s: %v (skipping)", addr, err)
+			continue
+		}
+		p.listeners = append(p.listeners, ln)
+		log.Printf("[TCP] Listening on %s", addr)
+		go p.acceptLoop(ln)
+	}
+
+	if len(p.listeners) == 0 {
+		return fmt.Errorf("tcp: could not listen on any address for port %d", p.port)
+	}
+
+	// Register first listener for graceful upgrade
+	upgrade.SaveListener(listenerName, p.listeners[0])
 	return nil
 }
 
 func (p *TCPProxy) Stop() {
 	close(p.quit)
-	if p.listener != nil {
-		p.listener.Close()
+	for _, ln := range p.listeners {
+		ln.Close()
 	}
 }
 
-func (p *TCPProxy) acceptLoop() {
+func (p *TCPProxy) acceptLoop(ln net.Listener) {
 	for {
-		conn, err := p.listener.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-p.quit:
