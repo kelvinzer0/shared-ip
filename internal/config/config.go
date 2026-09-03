@@ -160,13 +160,36 @@ func (c *Config) GetUniquePorts() []int {
 	return ports
 }
 
+// matchDomain Case-sensitive match with wildcard support.
+func matchDomain(configured, requested string) bool {
+	if configured == requested {
+		return true
+	}
+	if strings.HasPrefix(configured, "*.") {
+		return strings.HasSuffix(requested, configured[1:])
+	}
+	return false
+}
+
+// matchDomainFold Case-insensitive match with wildcard support.
+func matchDomainFold(configured, requested string) bool {
+	if strings.EqualFold(configured, requested) {
+		return true
+	}
+	if strings.HasPrefix(configured, "*.") {
+		suffix := configured[1:]
+		return strings.HasSuffix(strings.ToLower(requested), strings.ToLower(suffix))
+	}
+	return false
+}
+
 // Lookup finds a mapping by domain and port (case-sensitive).
 func (c *Config) Lookup(domain string, port int) *DomainMapping {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	for i := range c.Domains {
-		if c.Domains[i].Domain == domain && c.Domains[i].Port == port {
+		if matchDomain(c.Domains[i].Domain, domain) && c.Domains[i].Port == port {
 			return &c.Domains[i]
 		}
 	}
@@ -179,7 +202,7 @@ func (c *Config) LookupFold(domain string, port int) *DomainMapping {
 	defer c.mu.RUnlock()
 
 	for i := range c.Domains {
-		if strings.EqualFold(c.Domains[i].Domain, domain) && c.Domains[i].Port == port {
+		if matchDomainFold(c.Domains[i].Domain, domain) && c.Domains[i].Port == port {
 			return &c.Domains[i]
 		}
 	}
@@ -229,7 +252,7 @@ func (c *Config) LookupByDomain(domain string) *DomainMapping {
 	defer c.mu.RUnlock()
 
 	for i := range c.Domains {
-		if c.Domains[i].Domain == domain {
+		if matchDomain(c.Domains[i].Domain, domain) {
 			return &c.Domains[i]
 		}
 	}
@@ -242,7 +265,7 @@ func (c *Config) LookupByDomainFold(domain string) *DomainMapping {
 	defer c.mu.RUnlock()
 
 	for i := range c.Domains {
-		if strings.EqualFold(c.Domains[i].Domain, domain) {
+		if matchDomainFold(c.Domains[i].Domain, domain) {
 			return &c.Domains[i]
 		}
 	}
