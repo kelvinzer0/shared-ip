@@ -116,7 +116,6 @@ func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 	previewLen := 0
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	defer clientConn.SetReadDeadline(time.Time{})
 
 	for previewLen < MaxLookahead {
 		n, err := clientConn.Read(preview[previewLen:])
@@ -136,6 +135,9 @@ func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 		result := extractor.ExtractDomainIncremental(preview[:previewLen])
 
 		if result.Done {
+			// CRITICAL: clear read deadline BEFORE routing to long-lived connections
+			// Without this, the 5s deadline kills WebSocket/SSH/etc after ~5 seconds
+			clientConn.SetReadDeadline(time.Time{})
 			p.routeConnection(clientConn, preview[:previewLen], result.Host, result.Protocol)
 			return
 		}
@@ -147,6 +149,7 @@ func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 		}
 	}
 
+	clientConn.SetReadDeadline(time.Time{})
 	result := extractor.ExtractDomainIncremental(preview[:previewLen])
 	p.routeConnection(clientConn, preview[:previewLen], result.Host, result.Protocol)
 }
